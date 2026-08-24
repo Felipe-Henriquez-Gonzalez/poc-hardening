@@ -1,0 +1,194 @@
+---
+- name: Demo de Hardening RHEL 9
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  vars:
+    hardening_sysctl_file: /etc/sysctl.d/99-demo-hardening.conf
+
+  tasks:
+
+    #################################################################
+    # CONTROL 1
+    # Proteger /etc/passwd
+    #################################################################
+
+    - name: "CONTROL 01 | Configurar permisos de /etc/passwd"
+      ansible.builtin.file:
+        path: /etc/passwd
+        owner: root
+        group: root
+        mode: "0644"
+
+
+    #################################################################
+    # CONTROL 2
+    # Proteger /etc/shadow
+    #################################################################
+
+    - name: "CONTROL 02 | Configurar permisos de /etc/shadow"
+      ansible.builtin.file:
+        path: /etc/shadow
+        owner: root
+        group: root
+        mode: "0000"
+
+
+    #################################################################
+    # CONTROL 3
+    # Proteger /etc/group y /etc/gshadow
+    #################################################################
+
+    - name: "CONTROL 03 | Configurar permisos de /etc/group"
+      ansible.builtin.file:
+        path: /etc/group
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: "CONTROL 03 | Configurar permisos de /etc/gshadow"
+      ansible.builtin.file:
+        path: /etc/gshadow
+        owner: root
+        group: root
+        mode: "0000"
+
+
+    #################################################################
+    # CONTROL 4
+    # Deshabilitar Ctrl+Alt+Del
+    #################################################################
+
+    - name: "CONTROL 04 | Deshabilitar Ctrl+Alt+Del"
+      ansible.builtin.systemd:
+        name: ctrl-alt-del.target
+        masked: true
+
+
+    #################################################################
+    # CONTROL 5
+    # Configurar umask seguro
+    #################################################################
+
+    - name: "CONTROL 05 | Configurar umask 027"
+      ansible.builtin.copy:
+        dest: /etc/profile.d/99-security-umask.sh
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Configuración administrada por Ansible
+          # Hardening Demo RHEL 9
+          umask 027
+
+
+    #################################################################
+    # CONTROL 6
+    # Address Space Layout Randomization - ASLR
+    #################################################################
+
+    - name: "CONTROL 06 | Habilitar ASLR"
+      ansible.posix.sysctl:
+        name: kernel.randomize_va_space
+        value: "2"
+        state: present
+        sysctl_file: "{{ hardening_sysctl_file }}"
+        reload: true
+
+
+    #################################################################
+    # CONTROL 7
+    # Restringir información sensible del kernel
+    #################################################################
+
+    - name: "CONTROL 07 | Restringir acceso a dmesg"
+      ansible.posix.sysctl:
+        name: kernel.dmesg_restrict
+        value: "1"
+        state: present
+        sysctl_file: "{{ hardening_sysctl_file }}"
+        reload: true
+
+    - name: "CONTROL 07 | Restringir exposición de punteros del kernel"
+      ansible.posix.sysctl:
+        name: kernel.kptr_restrict
+        value: "2"
+        state: present
+        sysctl_file: "{{ hardening_sysctl_file }}"
+        reload: true
+
+
+    #################################################################
+    # CONTROL 8
+    # Protección contra ataques utilizando links
+    #################################################################
+
+    - name: "CONTROL 08 | Proteger hardlinks"
+      ansible.posix.sysctl:
+        name: fs.protected_hardlinks
+        value: "1"
+        state: present
+        sysctl_file: "{{ hardening_sysctl_file }}"
+        reload: true
+
+    - name: "CONTROL 08 | Proteger symlinks"
+      ansible.posix.sysctl:
+        name: fs.protected_symlinks
+        value: "1"
+        state: present
+        sysctl_file: "{{ hardening_sysctl_file }}"
+        reload: true
+
+
+    #################################################################
+    # CONTROL 9
+    # Deshabilitar core dumps
+    #################################################################
+
+    - name: "CONTROL 09 | Deshabilitar core dumps mediante sysctl"
+      ansible.posix.sysctl:
+        name: fs.suid_dumpable
+        value: "0"
+        state: present
+        sysctl_file: "{{ hardening_sysctl_file }}"
+        reload: true
+
+    - name: "CONTROL 09 | Limitar creación de core dumps"
+      ansible.builtin.copy:
+        dest: /etc/security/limits.d/99-disable-core-dumps.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Configuración administrada por Ansible
+          # Hardening Demo RHEL 9
+          * hard core 0
+
+
+    #################################################################
+    # CONTROL 10
+    # Audit daemon
+    #################################################################
+
+    - name: "CONTROL 10 | Instalar audit"
+      ansible.builtin.dnf:
+        name: audit
+        state: present
+
+    - name: "CONTROL 10 | Habilitar y arrancar auditd"
+      ansible.builtin.service:
+        name: auditd
+        state: started
+        enabled: true
+
+
+    #################################################################
+    # RESUMEN
+    #################################################################
+
+    - name: Mostrar resumen del hardening
+      ansible.builtin.debug:
+        msg:
+          - "Hardening RHEL 9 completado."
+          - "10 controles de seguridad aplicados."
