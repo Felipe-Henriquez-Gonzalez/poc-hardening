@@ -1,0 +1,421 @@
+---
+- name: Validar Hardening Windows Server 2025
+  hosts: windows
+  gather_facts: true
+
+  vars:
+    hardening_results: []
+
+  tasks:
+
+    #################################################################
+    # INFORMACION DEL SISTEMA
+    #################################################################
+
+    - name: Obtener informacion de Windows
+      ansible.windows.win_shell: |
+        Get-ComputerInfo |
+        Select-Object WindowsProductName,WindowsVersion,OsBuildNumber |
+        ConvertTo-Json -Compress
+      register: windows_info
+      changed_when: false
+
+    #################################################################
+    # CONTROL 01 - LM HASH
+    #################################################################
+
+    - name: "CONTROL 01 | Validar NoLMHash"
+      ansible.windows.win_shell: |
+        $value = (Get-ItemProperty `
+          -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" `
+          -Name NoLMHash `
+          -ErrorAction SilentlyContinue).NoLMHash
+
+        if ($value -eq 1) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_01
+      changed_when: false
+
+    - name: Registrar CONTROL 01
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '01',
+              'description': 'No almacenar hashes LM',
+              'status': control_01.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 02 - SMBv1
+    #################################################################
+
+    - name: "CONTROL 02 | Validar SMBv1"
+      ansible.windows.win_shell: |
+        $feature = Get-WindowsOptionalFeature `
+          -Online `
+          -FeatureName SMB1Protocol `
+          -ErrorAction SilentlyContinue
+
+        $smb = Get-SmbServerConfiguration
+
+        $featureDisabled = $true
+
+        if ($null -ne $feature) {
+          $featureDisabled = ($feature.State -ne "Enabled")
+        }
+
+        if (($featureDisabled) -and
+            ($smb.EnableSMB1Protocol -eq $false)) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_02
+      changed_when: false
+
+    - name: Registrar CONTROL 02
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '02',
+              'description': 'SMBv1 deshabilitado',
+              'status': control_02.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 03 - AUTORUN
+    #################################################################
+
+    - name: "CONTROL 03 | Validar AutoRun"
+      ansible.windows.win_shell: |
+        $path = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+
+        $value = (Get-ItemProperty `
+          -Path $path `
+          -Name NoDriveTypeAutoRun `
+          -ErrorAction SilentlyContinue).NoDriveTypeAutoRun
+
+        if ($value -eq 255) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_03
+      changed_when: false
+
+    - name: Registrar CONTROL 03
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '03',
+              'description': 'AutoRun deshabilitado',
+              'status': control_03.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 04 - UAC
+    #################################################################
+
+    - name: "CONTROL 04 | Validar UAC"
+      ansible.windows.win_shell: |
+        $value = (Get-ItemProperty `
+          -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
+          -Name EnableLUA `
+          -ErrorAction SilentlyContinue).EnableLUA
+
+        if ($value -eq 1) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_04
+      changed_when: false
+
+    - name: Registrar CONTROL 04
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '04',
+              'description': 'User Account Control habilitado',
+              'status': control_04.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 05 - MACHINE INACTIVITY
+    #################################################################
+
+    - name: "CONTROL 05 | Validar limite de inactividad"
+      ansible.windows.win_shell: |
+        $value = (Get-ItemProperty `
+          -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
+          -Name InactivityTimeoutSecs `
+          -ErrorAction SilentlyContinue).InactivityTimeoutSecs
+
+        if (($value -gt 0) -and ($value -le 900)) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_05
+      changed_when: false
+
+    - name: Registrar CONTROL 05
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '05',
+              'description': 'Bloqueo por inactividad <= 900 segundos',
+              'status': control_05.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 06 - GUEST
+    #
+    # Se identifica usando RID 501.
+    # Esto evita depender de que Windows se encuentre en ingles.
+    #################################################################
+
+    - name: "CONTROL 06 | Validar cuenta Guest"
+      ansible.windows.win_shell: |
+        $guest = Get-CimInstance Win32_UserAccount `
+          -Filter "LocalAccount=True" |
+          Where-Object { $_.SID -match "-501$" }
+
+        if ($null -eq $guest) {
+          Write-Output "PASS"
+        }
+        elseif ($guest.Disabled -eq $true) {
+          Write-Output "PASS"
+        }
+        else {
+          Write-Output "FAIL"
+        }
+      register: control_06
+      changed_when: false
+
+    - name: Registrar CONTROL 06
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '06',
+              'description': 'Cuenta Guest deshabilitada',
+              'status': control_06.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 07 - AUDITORIA DE LOGON
+    #################################################################
+
+    - name: "CONTROL 07 | Validar auditoria de Logon"
+      ansible.windows.win_shell: |
+        $output = auditpol /get `
+          /subcategory:"{0CCE9215-69AE-11D9-BED3-505054503030}" `
+          /r
+
+        if (($output -match "Success") -and
+            ($output -match "Failure")) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_07
+      changed_when: false
+
+    - name: Registrar CONTROL 07
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '07',
+              'description': 'Auditoria de inicio de sesion Success y Failure',
+              'status': control_07.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 08 - LSASS PROTECTED PROCESS
+    #################################################################
+
+    - name: "CONTROL 08 | Validar proteccion de LSASS"
+      ansible.windows.win_shell: |
+        $value = (Get-ItemProperty `
+          -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" `
+          -Name RunAsPPL `
+          -ErrorAction SilentlyContinue).RunAsPPL
+
+        if (($value -eq 1) -or ($value -eq 2)) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_08
+      changed_when: false
+
+    - name: Registrar CONTROL 08
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '08',
+              'description': 'LSASS ejecutandose como Protected Process',
+              'status': control_08.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 09 - MICROSOFT DEFENDER
+    #################################################################
+
+    - name: "CONTROL 09 | Validar Microsoft Defender Real-Time Protection"
+      ansible.windows.win_shell: |
+        try {
+
+          $status = Get-MpComputerStatus -ErrorAction Stop
+
+          if ($status.RealTimeProtectionEnabled -eq $true) {
+            Write-Output "PASS"
+          } else {
+            Write-Output "FAIL"
+          }
+
+        } catch {
+
+          Write-Output "FAIL"
+
+        }
+      register: control_09
+      changed_when: false
+
+    - name: Registrar CONTROL 09
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '09',
+              'description': 'Microsoft Defender Real-Time Protection habilitado',
+              'status': control_09.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CONTROL 10
+    # AUDITORIA DE CREACION DE PROCESOS + COMMAND LINE
+    #################################################################
+
+    - name: "CONTROL 10 | Validar auditoria Process Creation"
+      ansible.windows.win_shell: |
+        $audit = auditpol /get `
+          /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}" `
+          /r
+
+        $cmdline = (Get-ItemProperty `
+          -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" `
+          -Name ProcessCreationIncludeCmdLine_Enabled `
+          -ErrorAction SilentlyContinue).ProcessCreationIncludeCmdLine_Enabled
+
+        if (($audit -match "Success") -and
+            ($cmdline -eq 1)) {
+          Write-Output "PASS"
+        } else {
+          Write-Output "FAIL"
+        }
+      register: control_10
+      changed_when: false
+
+    - name: Registrar CONTROL 10
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '10',
+              'description': 'Auditoria de creacion de procesos y command line',
+              'status': control_10.stdout | trim
+            }]
+          }}
+
+    #################################################################
+    # CALCULAR RESULTADOS
+    #################################################################
+
+    - name: Calcular resultados
+      ansible.builtin.set_fact:
+
+        controls_passed: >-
+          {{
+            hardening_results
+            | selectattr('status', 'equalto', 'PASS')
+            | list
+            | length
+          }}
+
+        controls_failed: >-
+          {{
+            hardening_results
+            | selectattr('status', 'equalto', 'FAIL')
+            | list
+            | length
+          }}
+
+    #################################################################
+    # MOSTRAR CADA CONTROL
+    #################################################################
+
+    - name: Mostrar resultados individuales
+      ansible.builtin.debug:
+        msg: >-
+          CONTROL {{ item.control }}
+          | {{ item.description }}
+          | {{ item.status }}
+      loop: "{{ hardening_results }}"
+
+    #################################################################
+    # REPORTE FINAL
+    #################################################################
+
+    - name: Mostrar reporte final
+      ansible.builtin.debug:
+        msg:
+          - "=========================================================="
+          - "       WINDOWS SERVER 2025 - HARDENING REPORT"
+          - "=========================================================="
+          - "Host              : {{ inventory_hostname }}"
+          - "Sistema Operativo : {{ windows_info.stdout }}"
+          - ""
+          - "Controles evaluados : {{ hardening_results | length }}"
+          - "PASS                : {{ controls_passed }}"
+          - "FAIL                : {{ controls_failed }}"
+          - ""
+          - >-
+            RESULTADO:
+            {{
+              'COMPLIANT - Los 10 controles estan aplicados'
+              if controls_failed | int == 0
+              else
+              'NON-COMPLIANT - Existen controles pendientes'
+            }}
+          - "=========================================================="
