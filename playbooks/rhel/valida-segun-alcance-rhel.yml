@@ -1,0 +1,416 @@
+---
+- name: RHEL 9 - Security Compliance Validation
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  vars:
+    expected_admin_users:
+      - root
+
+  tasks:
+
+    # ============================================================
+    # 0. VALIDAR SISTEMA OPERATIVO
+    # ============================================================
+
+    - name: Validate operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == "RedHat"
+          - ansible_facts['distribution_major_version'] == "9"
+        fail_msg: >-
+          This playbook is designed for RHEL 9.
+          Detected: {{ ansible_facts['distribution'] }}
+          {{ ansible_facts['distribution_version'] }}
+        success_msg: "Operating System validated: RHEL 9"
+
+
+    # ============================================================
+    # CONTROL 1 - SELINUX ENABLED
+    # ============================================================
+
+    - name: Get SELinux status
+      ansible.builtin.command:
+        cmd: getenforce
+      register: selinux_status
+      changed_when: false
+      failed_when: false
+
+    - name: Set SELinux enabled result
+      ansible.builtin.set_fact:
+        control_1_status: >-
+          {{
+            'PASS'
+            if selinux_status.stdout | trim != 'Disabled'
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 2 - SELINUX ENFORCING
+    # ============================================================
+
+    - name: Set SELinux enforcing result
+      ansible.builtin.set_fact:
+        control_2_status: >-
+          {{
+            'PASS'
+            if selinux_status.stdout | trim == 'Enforcing'
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 3 - FIREWALLD INSTALLED
+    # ============================================================
+
+    - name: Check if firewalld package is installed
+      ansible.builtin.command:
+        cmd: rpm -q firewalld
+      register: firewalld_package
+      changed_when: false
+      failed_when: false
+
+    - name: Set firewalld package result
+      ansible.builtin.set_fact:
+        control_3_status: >-
+          {{
+            'PASS'
+            if firewalld_package.rc == 0
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 4 - FIREWALLD ENABLED
+    # ============================================================
+
+    - name: Check if firewalld is enabled
+      ansible.builtin.command:
+        cmd: systemctl is-enabled firewalld
+      register: firewalld_enabled
+      changed_when: false
+      failed_when: false
+
+    - name: Set firewalld enabled result
+      ansible.builtin.set_fact:
+        control_4_status: >-
+          {{
+            'PASS'
+            if firewalld_enabled.stdout | trim == 'enabled'
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 5 - FIREWALLD RUNNING
+    # ============================================================
+
+    - name: Check if firewalld is running
+      ansible.builtin.command:
+        cmd: systemctl is-active firewalld
+      register: firewalld_active
+      changed_when: false
+      failed_when: false
+
+    - name: Set firewalld running result
+      ansible.builtin.set_fact:
+        control_5_status: >-
+          {{
+            'PASS'
+            if firewalld_active.stdout | trim == 'active'
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 6 - SECURITY UPDATES
+    # ============================================================
+
+    - name: Check for available security updates
+      ansible.builtin.command:
+        cmd: dnf -q check-update --security
+      register: security_updates
+      changed_when: false
+
+      # dnf check-update:
+      # 0   = No updates
+      # 100 = Updates available
+      failed_when: security_updates.rc not in [0, 100]
+
+    - name: Set security updates result
+      ansible.builtin.set_fact:
+        control_6_status: >-
+          {{
+            'PASS'
+            if security_updates.rc == 0
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 7 - SECURITY ADVISORIES / CVEs
+    # ============================================================
+
+    - name: Get security advisories
+      ansible.builtin.command:
+        cmd: dnf -q updateinfo list security
+      register: security_advisories
+      changed_when: false
+      failed_when: false
+
+    - name: Extract RHSA advisories
+      ansible.builtin.set_fact:
+        rhsa_list: >-
+          {{
+            security_advisories.stdout
+            | regex_findall('RHSA-[0-9]+:[0-9]+')
+            | unique
+            | list
+          }}
+
+    - name: Set advisory result
+      ansible.builtin.set_fact:
+        control_7_status: >-
+          {{
+            'PASS'
+            if rhsa_list | length == 0
+            else 'WARN'
+          }}
+
+
+    # ============================================================
+    # CONTROL 8 - ROOT UID
+    # ============================================================
+
+    - name: Get root account
+      ansible.builtin.getent:
+        database: passwd
+        key: root
+
+    - name: Set root UID result
+      ansible.builtin.set_fact:
+        control_8_status: >-
+          {{
+            'PASS'
+            if ansible_facts.getent_passwd['root'][1] | int == 0
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 9 - ADDITIONAL UID 0 ACCOUNTS
+    # ============================================================
+
+    - name: Find accounts with UID 0
+      ansible.builtin.shell: |
+        set -o pipefail
+        awk -F: '$3 == 0 {print $1}' /etc/passwd
+      args:
+        executable: /bin/bash
+      register: uid_zero_users
+      changed_when: false
+      failed_when: false
+
+    - name: Convert UID 0 accounts to list
+      ansible.builtin.set_fact:
+        uid_zero_list: "{{ uid_zero_users.stdout_lines }}"
+
+    - name: Set UID 0 result
+      ansible.builtin.set_fact:
+        control_9_status: >-
+          {{
+            'PASS'
+            if uid_zero_list == ['root']
+            else 'FAIL'
+          }}
+
+
+    # ============================================================
+    # CONTROL 10 - ADMINISTRATIVE USERS / WHEEL
+    # ============================================================
+
+    - name: Get wheel group
+      ansible.builtin.getent:
+        database: group
+        key: wheel
+      register: wheel_group_result
+      failed_when: false
+
+    - name: Set wheel users
+      ansible.builtin.set_fact:
+        wheel_users: >-
+          {{
+            ansible_facts.getent_group['wheel'][2].split(',')
+            if (
+              ansible_facts.getent_group is defined
+              and 'wheel' in ansible_facts.getent_group
+              and ansible_facts.getent_group['wheel'][2] | length > 0
+            )
+            else []
+          }}
+
+    - name: Set administrative users result
+      ansible.builtin.set_fact:
+        control_10_status: >-
+          {{
+            'PASS'
+            if wheel_users | length <= 1
+            else 'WARN'
+          }}
+
+
+    # ============================================================
+    # CALCULATE RESULTS
+    # ============================================================
+
+    - name: Build compliance results
+      ansible.builtin.set_fact:
+        compliance_results:
+          - status: "{{ control_1_status }}"
+            control: "SELinux Enabled"
+            detail: "{{ selinux_status.stdout | trim }}"
+
+          - status: "{{ control_2_status }}"
+            control: "SELinux Enforcing"
+            detail: "{{ selinux_status.stdout | trim }}"
+
+          - status: "{{ control_3_status }}"
+            control: "Firewalld Installed"
+            detail: "{{ firewalld_package.stdout | trim }}"
+
+          - status: "{{ control_4_status }}"
+            control: "Firewalld Enabled"
+            detail: "{{ firewalld_enabled.stdout | trim }}"
+
+          - status: "{{ control_5_status }}"
+            control: "Firewalld Running"
+            detail: "{{ firewalld_active.stdout | trim }}"
+
+          - status: "{{ control_6_status }}"
+            control: "Security Updates"
+            detail: >-
+              {{
+                'No pending security updates'
+                if security_updates.rc == 0
+                else 'Security updates available'
+              }}
+
+          - status: "{{ control_7_status }}"
+            control: "Security Advisories"
+            detail: "{{ rhsa_list | length }} RHSA advisories detected"
+
+          - status: "{{ control_8_status }}"
+            control: "Root UID"
+            detail: "root UID={{ ansible_facts.getent_passwd['root'][1] }}"
+
+          - status: "{{ control_9_status }}"
+            control: "UID 0 Accounts"
+            detail: "{{ uid_zero_list | join(', ') }}"
+
+          - status: "{{ control_10_status }}"
+            control: "Administrative Users"
+            detail: >-
+              wheel users:
+              {{
+                wheel_users | join(', ')
+                if wheel_users | length > 0
+                else 'none'
+              }}
+
+
+    # ============================================================
+    # CALCULATE STATISTICS
+    # ============================================================
+
+    - name: Calculate compliance statistics
+      ansible.builtin.set_fact:
+        total_controls: "{{ compliance_results | length }}"
+        passed_controls: >-
+          {{
+            compliance_results
+            | selectattr('status', 'equalto', 'PASS')
+            | list
+            | length
+          }}
+        failed_controls: >-
+          {{
+            compliance_results
+            | selectattr('status', 'equalto', 'FAIL')
+            | list
+            | length
+          }}
+        warning_controls: >-
+          {{
+            compliance_results
+            | selectattr('status', 'equalto', 'WARN')
+            | list
+            | length
+          }}
+
+
+    # ============================================================
+    # DISPLAY DETAILED RESULTS
+    # ============================================================
+
+    - name: Display individual control results
+      ansible.builtin.debug:
+        msg: >-
+          [{{ item.status }}]
+          {{ item.control }}
+          - {{ item.detail }}
+      loop: "{{ compliance_results }}"
+
+
+    # ============================================================
+    # FINAL COMPLIANCE REPORT
+    # ============================================================
+
+    - name: Display final compliance report
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "          RHEL 9 SECURITY COMPLIANCE REPORT"
+          - "============================================================"
+          - "Host            : {{ inventory_hostname }}"
+          - "Operating System: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Kernel          : {{ ansible_kernel }}"
+          - "------------------------------------------------------------"
+          - "TOTAL CONTROLS   : {{ total_controls }}"
+          - "PASSED           : {{ passed_controls }}"
+          - "FAILED           : {{ failed_controls }}"
+          - "WARNINGS         : {{ warning_controls }}"
+          - "------------------------------------------------------------"
+          - >-
+            COMPLIANCE       :
+            {{
+              (
+                (passed_controls | int * 100)
+                / (total_controls | int)
+              ) | round(0)
+            }}%
+          - "============================================================"
+          - >-
+            OVERALL STATUS   :
+            {{
+              'COMPLIANT'
+              if failed_controls | int == 0
+              else 'NON-COMPLIANT'
+            }}
+          - "============================================================"
+
+
+    # ============================================================
+    # OPTIONAL - SHOW PENDING SECURITY UPDATES
+    # ============================================================
+
+    - name: Display pending security updates
+      ansible.builtin.debug:
+        msg: "{{ security_updates.stdout_lines }}"
+      when: security_updates.rc == 100
+
+    - name: Display detected security advisories
+      ansible.builtin.debug:
+        msg: "{{ rhsa_list }}"
+      when: rhsa_list | length > 0
