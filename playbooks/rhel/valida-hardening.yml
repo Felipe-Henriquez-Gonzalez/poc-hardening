@@ -1,0 +1,390 @@
+---
+- name: Validar hardening RHEL 9
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  vars:
+    hardening_results: []
+
+  tasks:
+
+    #################################################################
+    # CONTROL 1 - /etc/passwd
+    #################################################################
+
+    - name: "CONTROL 01 | Obtener permisos de /etc/passwd"
+      ansible.builtin.stat:
+        path: /etc/passwd
+      register: passwd_stat
+
+    - name: "CONTROL 01 | Evaluar /etc/passwd"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '01',
+              'description': 'Permisos de /etc/passwd',
+              'status': 'PASS'
+                        if (
+                          passwd_stat.stat.exists and
+                          passwd_stat.stat.pw_name == 'root' and
+                          passwd_stat.stat.gr_name == 'root' and
+                          passwd_stat.stat.mode == '0644'
+                        )
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 2 - /etc/shadow
+    #################################################################
+
+    - name: "CONTROL 02 | Obtener permisos de /etc/shadow"
+      ansible.builtin.stat:
+        path: /etc/shadow
+      register: shadow_stat
+
+    - name: "CONTROL 02 | Evaluar /etc/shadow"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '02',
+              'description': 'Permisos de /etc/shadow',
+              'status': 'PASS'
+                        if (
+                          shadow_stat.stat.exists and
+                          shadow_stat.stat.pw_name == 'root' and
+                          shadow_stat.stat.gr_name == 'root' and
+                          shadow_stat.stat.mode == '0000'
+                        )
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 3 - /etc/group y /etc/gshadow
+    #################################################################
+
+    - name: "CONTROL 03 | Obtener permisos de /etc/group"
+      ansible.builtin.stat:
+        path: /etc/group
+      register: group_stat
+
+    - name: "CONTROL 03 | Obtener permisos de /etc/gshadow"
+      ansible.builtin.stat:
+        path: /etc/gshadow
+      register: gshadow_stat
+
+    - name: "CONTROL 03 | Evaluar archivos de grupos"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '03',
+              'description': 'Permisos de /etc/group y /etc/gshadow',
+              'status': 'PASS'
+                        if (
+                          group_stat.stat.exists and
+                          group_stat.stat.pw_name == 'root' and
+                          group_stat.stat.gr_name == 'root' and
+                          group_stat.stat.mode == '0644' and
+                          gshadow_stat.stat.exists and
+                          gshadow_stat.stat.pw_name == 'root' and
+                          gshadow_stat.stat.gr_name == 'root' and
+                          gshadow_stat.stat.mode == '0000'
+                        )
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 4 - Ctrl+Alt+Del
+    #################################################################
+
+    - name: "CONTROL 04 | Validar ctrl-alt-del.target"
+      ansible.builtin.command:
+        cmd: systemctl is-enabled ctrl-alt-del.target
+      register: ctrl_alt_del
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 04 | Evaluar Ctrl+Alt+Del"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '04',
+              'description': 'Ctrl+Alt+Del deshabilitado',
+              'status': 'PASS'
+                        if ctrl_alt_del.stdout in ['masked', 'masked-runtime']
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 5 - UMASK 027
+    #################################################################
+
+    - name: "CONTROL 05 | Validar configuración de umask"
+      ansible.builtin.command:
+        cmd: grep -E '^umask[[:space:]]+027$' /etc/profile.d/99-security-umask.sh
+      register: umask_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 05 | Evaluar umask"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '05',
+              'description': 'UMASK configurado en 027',
+              'status': 'PASS'
+                        if umask_check.rc == 0
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 6 - ASLR
+    #################################################################
+
+    - name: "CONTROL 06 | Consultar ASLR"
+      ansible.builtin.command:
+        cmd: sysctl -n kernel.randomize_va_space
+      register: aslr_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 06 | Evaluar ASLR"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '06',
+              'description': 'ASLR habilitado',
+              'status': 'PASS'
+                        if aslr_check.stdout | trim == '2'
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 7 - Protección de información del kernel
+    #################################################################
+
+    - name: "CONTROL 07 | Consultar kernel.dmesg_restrict"
+      ansible.builtin.command:
+        cmd: sysctl -n kernel.dmesg_restrict
+      register: dmesg_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 07 | Consultar kernel.kptr_restrict"
+      ansible.builtin.command:
+        cmd: sysctl -n kernel.kptr_restrict
+      register: kptr_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 07 | Evaluar restricciones del kernel"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '07',
+              'description': 'Restricción de información sensible del kernel',
+              'status': 'PASS'
+                        if (
+                          dmesg_check.stdout | trim == '1' and
+                          kptr_check.stdout | trim == '2'
+                        )
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 8 - Hardlinks y symlinks
+    #################################################################
+
+    - name: "CONTROL 08 | Consultar protección de hardlinks"
+      ansible.builtin.command:
+        cmd: sysctl -n fs.protected_hardlinks
+      register: hardlinks_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 08 | Consultar protección de symlinks"
+      ansible.builtin.command:
+        cmd: sysctl -n fs.protected_symlinks
+      register: symlinks_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 08 | Evaluar protección de links"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '08',
+              'description': 'Protección de hardlinks y symlinks',
+              'status': 'PASS'
+                        if (
+                          hardlinks_check.stdout | trim == '1' and
+                          symlinks_check.stdout | trim == '1'
+                        )
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 9 - Core dumps
+    #################################################################
+
+    - name: "CONTROL 09 | Consultar fs.suid_dumpable"
+      ansible.builtin.command:
+        cmd: sysctl -n fs.suid_dumpable
+      register: suid_dumpable_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 09 | Validar limits de core dumps"
+      ansible.builtin.command:
+        cmd: grep -E '^\*[[:space:]]+hard[[:space:]]+core[[:space:]]+0$' /etc/security/limits.d/99-disable-core-dumps.conf
+      register: core_limits_check
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 09 | Evaluar core dumps"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '09',
+              'description': 'Core dumps deshabilitados',
+              'status': 'PASS'
+                        if (
+                          suid_dumpable_check.stdout | trim == '0' and
+                          core_limits_check.rc == 0
+                        )
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CONTROL 10 - auditd
+    #################################################################
+
+    - name: "CONTROL 10 | Validar que auditd está habilitado"
+      ansible.builtin.command:
+        cmd: systemctl is-enabled auditd
+      register: auditd_enabled
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 10 | Validar que auditd está activo"
+      ansible.builtin.command:
+        cmd: systemctl is-active auditd
+      register: auditd_active
+      changed_when: false
+      failed_when: false
+
+    - name: "CONTROL 10 | Evaluar auditd"
+      ansible.builtin.set_fact:
+        hardening_results: >-
+          {{
+            hardening_results +
+            [{
+              'control': '10',
+              'description': 'Servicio auditd habilitado y activo',
+              'status': 'PASS'
+                        if (
+                          auditd_enabled.stdout | trim == 'enabled' and
+                          auditd_active.stdout | trim == 'active'
+                        )
+                        else 'FAIL'
+            }]
+          }}
+
+
+    #################################################################
+    # CALCULAR RESULTADO
+    #################################################################
+
+    - name: Calcular controles aprobados
+      ansible.builtin.set_fact:
+        controls_passed: >-
+          {{
+            hardening_results |
+            selectattr('status', 'equalto', 'PASS') |
+            list |
+            length
+          }}
+
+        controls_failed: >-
+          {{
+            hardening_results |
+            selectattr('status', 'equalto', 'FAIL') |
+            list |
+            length
+          }}
+
+
+    #################################################################
+    # MOSTRAR RESULTADO POR CONTROL
+    #################################################################
+
+    - name: Mostrar resultado de controles
+      ansible.builtin.debug:
+        msg: >-
+          CONTROL {{ item.control }} |
+          {{ item.description }} |
+          {{ item.status }}
+      loop: "{{ hardening_results }}"
+
+
+    #################################################################
+    # RESULTADO FINAL
+    #################################################################
+
+    - name: Mostrar resumen final
+      ansible.builtin.debug:
+        msg:
+          - "========================================================="
+          - "     REPORTE DE HARDENING RHEL 9"
+          - "========================================================="
+          - "Host: {{ inventory_hostname }}"
+          - ""
+          - "Controles evaluados : {{ hardening_results | length }}"
+          - "Controles PASS      : {{ controls_passed }}"
+          - "Controles FAIL      : {{ controls_failed }}"
+          - ""
+          - >-
+            RESULTADO:
+            {{
+              'COMPLIANT - Todos los controles están aplicados'
+              if controls_failed | int == 0
+              else
+              'NON-COMPLIANT - Existen controles de hardening pendientes'
+            }}
+          - "========================================================="
