@@ -1,0 +1,341 @@
+---
+- name: Windows Security Configuration Assessment
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    expected_max_local_admins: 1
+
+  tasks:
+
+    # ============================================================
+    # 1. WINDOWS DEFENDER
+    # ============================================================
+
+    - name: Revisar estado de Microsoft Defender
+      ansible.windows.win_powershell:
+        script: |
+          $result = [ordered]@{}
+
+          try {
+              $status = Get-MpComputerStatus -ErrorAction Stop
+
+              $result.DefenderAvailable = $true
+              $result.AntivirusEnabled = $status.AntivirusEnabled
+              $result.AntispywareEnabled = $status.AntispywareEnabled
+              $result.RealTimeProtectionEnabled = $status.RealTimeProtectionEnabled
+              $result.BehaviorMonitorEnabled = $status.BehaviorMonitorEnabled
+              $result.IoavProtectionEnabled = $status.IoavProtectionEnabled
+              $result.AntivirusSignatureLastUpdated = $status.AntivirusSignatureLastUpdated
+          }
+          catch {
+              $result.DefenderAvailable = $false
+              $result.Error = $_.Exception.Message
+          }
+
+          $result | ConvertTo-Json -Compress
+      register: defender_raw
+      changed_when: false
+
+
+    - name: Procesar resultado de Defender
+      ansible.builtin.set_fact:
+        defender_status: "{{ defender_raw.output[0] | from_json }}"
+
+
+    # ============================================================
+    # 2. WINDOWS EVENT LOG / SYSLOG
+    # ============================================================
+
+    - name: Revisar configuración de Windows Event Logs
+      ansible.windows.win_powershell:
+        script: |
+          $logs = @(
+              "System",
+              "Security",
+              "Application"
+          )
+
+          $result = @()
+
+          foreach ($log in $logs) {
+
+              try {
+                  $config = Get-WinEvent -ListLog $log
+
+                  $result += [PSCustomObject]@{
+                      LogName       = $log
+                      Enabled       = $config.IsEnabled
+                      RecordCount   = $config.RecordCount
+                      MaximumSizeMB = [math]::Round($config.MaximumSizeInBytes / 1MB,2)
+                      LogMode       = $config.LogMode
+                  }
+              }
+              catch {
+                  $result += [PSCustomObject]@{
+                      LogName = $log
+                      Error   = $_.Exception.Message
+                  }
+              }
+          }
+
+          $result | ConvertTo-Json -Compress
+      register: eventlog_raw
+      changed_when: false
+
+
+    - name: Procesar configuración de Event Logs
+      ansible.builtin.set_fact:
+        eventlog_status: "{{ eventlog_raw.output[0] | from_json }}"
+
+
+    # ============================================================
+    # 3. DETECTAR SYSLOG / FORWARDING
+    # ============================================================
+
+    - name: Buscar servicios relacionados con Syslog o Log Forwarding
+      ansible.windows.win_powershell:
+        script: |
+          $services = Get-Service | Where-Object {
+              $_.Name -match 'nxlog|syslog|splunk|winlogbeat|filebeat|fluent|elastic' -or
+              $_.DisplayName -match 'nxlog|syslog|splunk|winlogbeat|filebeat|fluent|elastic'
+          }
+
+          if ($services) {
+
+              $services | Select-Object `
+                  Name,
+                  DisplayName,
+                  Status,
+                  StartType |
+                  ConvertTo-Json -Compress
+
+          }
+          else {
+
+              @(
+                  [PSCustomObject]@{
+                      Name        = "NOT_FOUND"
+                      DisplayName = "No Syslog/Log Forwarder detected"
+                      Status      = "N/A"
+                      StartType   = "N/A"
+                  }
+              ) | ConvertTo-Json -Compress
+
+          }
+      register: syslog_raw
+      changed_when: false
+
+
+    # ============================================================
+    # 4. PAQUETES / SOFTWARE DE SEGURIDAD
+    # ============================================================
+
+    - name: Revisar software de seguridad instalado
+      ansible.windows.win_powershell:
+        script: |
+          $paths = @(
+              "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+              "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          )
+
+          $software = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+              Where-Object {
+                  $_.DisplayName -match 'CrowdStrike|Falcon|Defender|Symantec|McAfee|Trellix|Sophos|Trend Micro|SentinelOne|Kaspersky|ESET|Carbon Black'
+              } |
+              Select-Object DisplayName, DisplayVersion, Publisher |
+              Sort-Object DisplayName -Unique
+
+          if ($software) {
+
+              $software | ConvertTo-Json -Compress
+
+          }
+          else {
+
+              @(
+                  [PSCustomObject]@{
+                      DisplayName    = "NOT_FOUND"
+                      DisplayVersion = "N/A"
+                      Publisher      = "No third-party security software detected"
+                  }
+              ) | ConvertTo-Json -Compress
+
+          }
+      register: security_software_raw
+      changed_when: false
+
+
+    # ============================================================
+    # 5. CROWDSTRIKE
+    # ============================================================
+
+    - name: Revisar específicamente CrowdStrike Falcon
+      ansible.windows.win_powershell:
+        script: |
+          $service = Get-Service -Name CSFalconService -ErrorAction SilentlyContinue
+
+          if ($service) {
+
+              [PSCustomObject]@{
+                  Installed   = $true
+                  ServiceName = $service.Name
+                  Status      = $service.Status.ToString()
+                  StartType   = $service.StartType.ToString()
+              } | ConvertTo-Json -Compress
+
+          }
+          else {
+
+              [PSCustomObject]@{
+                  Installed   = $false
+                  ServiceName = "CSFalconService"
+                  Status      = "NOT_FOUND"
+                  StartType   = "N/A"
+              } | ConvertTo-Json -Compress
+
+          }
+      register: crowdstrike_raw
+      changed_when: false
+
+
+    - name: Procesar CrowdStrike
+      ansible.builtin.set_fact:
+        crowdstrike_status: "{{ crowdstrike_raw.output[0] | from_json }}"
+
+
+    # ============================================================
+    # 6. CUENTA ADMINISTRATOR
+    # ============================================================
+
+    - name: Revisar estado de cuenta Administrator integrada
+      ansible.windows.win_powershell:
+        script: |
+          # RID 500 identifica la cuenta Administrator integrada
+          $admin = Get-LocalUser |
+              Where-Object {
+                  $_.SID.Value -match '-500$'
+              }
+
+          if ($admin) {
+
+              [PSCustomObject]@{
+                  Name        = $admin.Name
+                  Enabled     = $admin.Enabled
+                  SID         = $admin.SID.Value
+                  LastLogon   = $admin.LastLogon
+                  Description = $admin.Description
+              } | ConvertTo-Json -Compress
+
+          }
+          else {
+
+              [PSCustomObject]@{
+                  Name    = "NOT_FOUND"
+                  Enabled = $false
+              } | ConvertTo-Json -Compress
+
+          }
+      register: builtin_admin_raw
+      changed_when: false
+
+
+    - name: Procesar cuenta Administrator
+      ansible.builtin.set_fact:
+        builtin_admin_status: "{{ builtin_admin_raw.output[0] | from_json }}"
+
+
+    # ============================================================
+    # 7. MIEMBROS DEL GRUPO ADMINISTRATORS
+    # ============================================================
+
+    - name: Obtener miembros del grupo Administrators
+      ansible.windows.win_powershell:
+        script: |
+          # SID S-1-5-32-544 corresponde al grupo local Administrators
+          # independiente del idioma del sistema.
+
+          $group = Get-LocalGroup |
+              Where-Object {
+                  $_.SID.Value -eq "S-1-5-32-544"
+              }
+
+          $members = Get-LocalGroupMember -Group $group.Name
+
+          $members |
+              Select-Object Name, ObjectClass, PrincipalSource |
+              ConvertTo-Json -Compress
+      register: administrators_raw
+      changed_when: false
+
+
+    - name: Contar administradores
+      ansible.windows.win_powershell:
+        script: |
+          $group = Get-LocalGroup |
+              Where-Object {
+                  $_.SID.Value -eq "S-1-5-32-544"
+              }
+
+          $members = @(Get-LocalGroupMember -Group $group.Name)
+
+          [PSCustomObject]@{
+              GroupName = $group.Name
+              Count     = $members.Count
+          } | ConvertTo-Json -Compress
+      register: admin_count_raw
+      changed_when: false
+
+
+    - name: Procesar cantidad de administradores
+      ansible.builtin.set_fact:
+        admin_count: "{{ admin_count_raw.output[0] | from_json }}"
+
+
+    # ============================================================
+    # 8. RESULTADO FINAL
+    # ============================================================
+
+    - name: Mostrar reporte de seguridad
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - " WINDOWS SECURITY ASSESSMENT"
+          - " Host: {{ inventory_hostname }}"
+          - "============================================================"
+          - ""
+          - "1. MICROSOFT DEFENDER"
+          - "   Disponible: {{ defender_status.DefenderAvailable }}"
+          - "   Antivirus habilitado: {{ defender_status.AntivirusEnabled | default('N/A') }}"
+          - "   Real-Time Protection: {{ defender_status.RealTimeProtectionEnabled | default('N/A') }}"
+          - ""
+          - "2. WINDOWS EVENT LOG"
+          - "   {{ eventlog_status }}"
+          - ""
+          - "3. SYSLOG / LOG FORWARDER"
+          - "   {{ syslog_raw.output }}"
+          - ""
+          - "4. SOFTWARE DE SEGURIDAD"
+          - "   {{ security_software_raw.output }}"
+          - ""
+          - "5. CROWDSTRIKE"
+          - "   Instalado: {{ crowdstrike_status.Installed }}"
+          - "   Servicio: {{ crowdstrike_status.Status }}"
+          - ""
+          - "6. BUILT-IN ADMINISTRATOR"
+          - "   Cuenta: {{ builtin_admin_status.Name }}"
+          - "   Habilitada: {{ builtin_admin_status.Enabled }}"
+          - ""
+          - "7. ADMINISTRADORES"
+          - "   Grupo: {{ admin_count.GroupName }}"
+          - "   Cantidad de miembros: {{ admin_count.Count }}"
+          - "   Máximo esperado: {{ expected_max_local_admins }}"
+          - ""
+          - "============================================================"
+          - " RESULTADO"
+          - "============================================================"
+          - "Defender: {{ 'PASS' if defender_status.RealTimeProtectionEnabled | default(false) else 'REVIEW' }}"
+          - "CrowdStrike: {{ 'PASS' if crowdstrike_status.Installed else 'REVIEW' }}"
+          - "Built-in Administrator: {{ 'PASS' if not builtin_admin_status.Enabled else 'FAIL' }}"
+          - "Administradores: {{ 'PASS' if (admin_count.Count | int) <= expected_max_local_admins else 'FAIL' }}"
+          - "============================================================"
