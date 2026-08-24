@@ -1,0 +1,278 @@
+---
+- name: Aplicar Hardening Windows Server 2025
+  hosts: windows
+  gather_facts: true
+
+  tasks:
+
+    #################################################################
+    # CONTROL 01
+    # NO ALMACENAR HASHES LM
+    #################################################################
+
+    - name: "CONTROL 01 | Deshabilitar almacenamiento de hashes LM"
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: NoLMHash
+        data: 1
+        type: dword
+        state: present
+
+    #################################################################
+    # CONTROL 02
+    # DESHABILITAR SMBv1
+    #################################################################
+
+    - name: "CONTROL 02 | Deshabilitar SMBv1 en servidor SMB"
+      ansible.windows.win_shell: |
+        $config = Get-SmbServerConfiguration
+
+        if ($config.EnableSMB1Protocol -ne $false) {
+
+          Set-SmbServerConfiguration `
+            -EnableSMB1Protocol $false `
+            -Confirm:$false
+
+          Write-Output "CHANGED"
+
+        } else {
+
+          Write-Output "OK"
+
+        }
+      register: smb_server
+      changed_when: "'CHANGED' in smb_server.stdout"
+
+    - name: "CONTROL 02 | Deshabilitar componente SMBv1"
+      ansible.windows.win_shell: |
+        $feature = Get-WindowsOptionalFeature `
+          -Online `
+          -FeatureName SMB1Protocol `
+          -ErrorAction SilentlyContinue
+
+        if (($null -ne $feature) -and
+            ($feature.State -eq "Enabled")) {
+
+          Disable-WindowsOptionalFeature `
+            -Online `
+            -FeatureName SMB1Protocol `
+            -NoRestart
+
+          Write-Output "CHANGED"
+
+        } else {
+
+          Write-Output "OK"
+
+        }
+      register: smb_feature
+      changed_when: "'CHANGED' in smb_feature.stdout"
+
+    #################################################################
+    # CONTROL 03
+    # DESHABILITAR AUTORUN
+    #################################################################
+
+    - name: "CONTROL 03 | Deshabilitar AutoRun"
+      ansible.windows.win_regedit:
+        path: HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer
+        name: NoDriveTypeAutoRun
+        data: 255
+        type: dword
+        state: present
+
+    #################################################################
+    # CONTROL 04
+    # HABILITAR UAC
+    #################################################################
+
+    - name: "CONTROL 04 | Habilitar User Account Control"
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+        name: EnableLUA
+        data: 1
+        type: dword
+        state: present
+
+    #################################################################
+    # CONTROL 05
+    # BLOQUEO POR INACTIVIDAD
+    #
+    # 900 segundos = 15 minutos
+    #################################################################
+
+    - name: "CONTROL 05 | Configurar bloqueo por inactividad a 15 minutos"
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+        name: InactivityTimeoutSecs
+        data: 900
+        type: dword
+        state: present
+
+    #################################################################
+    # CONTROL 06
+    # DESHABILITAR GUEST
+    #
+    # Se busca por SID para evitar depender del idioma.
+    #################################################################
+
+    - name: "CONTROL 06 | Deshabilitar cuenta Guest"
+      ansible.windows.win_shell: |
+        $guest = Get-CimInstance Win32_UserAccount `
+          -Filter "LocalAccount=True" |
+          Where-Object { $_.SID -match "-501$" }
+
+        if ($null -eq $guest) {
+
+          Write-Output "OK"
+
+        }
+        elseif ($guest.Disabled -eq $false) {
+
+          Disable-LocalUser -Name $guest.Name
+
+          Write-Output "CHANGED"
+
+        }
+        else {
+
+          Write-Output "OK"
+
+        }
+      register: guest_result
+      changed_when: "'CHANGED' in guest_result.stdout"
+
+    #################################################################
+    # CONTROL 07
+    # AUDITORIA LOGON
+    #################################################################
+
+    - name: "CONTROL 07 | Habilitar auditoria Success y Failure para Logon"
+      ansible.windows.win_shell: |
+        $guid = "{0CCE9215-69AE-11D9-BED3-505054503030}"
+
+        $current = auditpol /get /subcategory:$guid /r
+
+        if (($current -match "Success") -and
+            ($current -match "Failure")) {
+
+          Write-Output "OK"
+
+        }
+        else {
+
+          auditpol /set `
+            /subcategory:$guid `
+            /success:enable `
+            /failure:enable
+
+          Write-Output "CHANGED"
+
+        }
+      register: audit_logon
+      changed_when: "'CHANGED' in audit_logon.stdout"
+
+    #################################################################
+    # CONTROL 08
+    # LSASS PROTECTED PROCESS
+    #
+    # RunAsPPL = 2
+    # Protected Process sin UEFI Lock.
+    #################################################################
+
+    - name: "CONTROL 08 | Habilitar proteccion LSASS"
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: RunAsPPL
+        data: 2
+        type: dword
+        state: present
+
+    #################################################################
+    # CONTROL 09
+    # MICROSOFT DEFENDER
+    #################################################################
+
+    - name: "CONTROL 09 | Habilitar Microsoft Defender Real-Time Protection"
+      ansible.windows.win_shell: |
+        try {
+
+          $status = Get-MpComputerStatus -ErrorAction Stop
+
+          if ($status.RealTimeProtectionEnabled -eq $false) {
+
+            Set-MpPreference `
+              -DisableRealtimeMonitoring $false
+
+            Write-Output "CHANGED"
+
+          }
+          else {
+
+            Write-Output "OK"
+
+          }
+
+        }
+        catch {
+
+          Write-Output "ERROR"
+
+          throw "Microsoft Defender Antivirus no esta disponible o no puede ser configurado."
+
+        }
+      register: defender_result
+      changed_when: "'CHANGED' in defender_result.stdout"
+
+    #################################################################
+    # CONTROL 10
+    # AUDITORIA CREACION DE PROCESOS
+    #################################################################
+
+    - name: "CONTROL 10 | Habilitar auditoria Process Creation"
+      ansible.windows.win_shell: |
+        $guid = "{0CCE922B-69AE-11D9-BED3-505054503030}"
+
+        $current = auditpol /get /subcategory:$guid /r
+
+        if ($current -match "Success") {
+
+          Write-Output "OK"
+
+        }
+        else {
+
+          auditpol /set `
+            /subcategory:$guid `
+            /success:enable
+
+          Write-Output "CHANGED"
+
+        }
+      register: process_audit
+      changed_when: "'CHANGED' in process_audit.stdout"
+
+    - name: "CONTROL 10 | Incluir command line en eventos de creacion de procesos"
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit
+        name: ProcessCreationIncludeCmdLine_Enabled
+        data: 1
+        type: dword
+        state: present
+
+    #################################################################
+    # RESUMEN
+    #################################################################
+
+    - name: Mostrar resumen del hardening
+      ansible.builtin.debug:
+        msg:
+          - "=========================================================="
+          - "       WINDOWS SERVER 2025 HARDENING COMPLETADO"
+          - "=========================================================="
+          - "Host: {{ inventory_hostname }}"
+          - ""
+          - "10 controles de hardening procesados."
+          - ""
+          - "Se recomienda ejecutar nuevamente el Compliance Check."
+          - "=========================================================="
