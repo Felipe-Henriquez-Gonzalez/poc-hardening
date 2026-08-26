@@ -1,6 +1,6 @@
 ---
 - name: Aplicar parches de seguridad detectados previamente
-  hosts: all
+  hosts: linux
   become: true
   gather_facts: false
 
