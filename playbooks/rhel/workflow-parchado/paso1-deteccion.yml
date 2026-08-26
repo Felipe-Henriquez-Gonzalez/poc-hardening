@@ -1,6 +1,6 @@
 ---
 - name: Detectar todos los CVE y parches de seguridad disponibles en RHEL
-  hosts: all
+  hosts: linux
   become: true
   gather_facts: true
 
