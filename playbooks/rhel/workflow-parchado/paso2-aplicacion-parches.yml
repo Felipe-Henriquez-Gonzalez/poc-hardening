@@ -1,116 +1,43 @@
 ---
-- name: Aplicar parches previamente detectados para un CVE
+- name: Aplicar parches de seguridad detectados previamente
   hosts: all
   become: true
-  gather_facts: true
+  gather_facts: false
 
   tasks:
 
-    - name: Validar que existe información del workflow
+    - name: Validar artifact del Workflow
       ansible.builtin.assert:
         that:
-          - cve_patch_plan is defined
+          - security_patch_plan is defined
         fail_msg: >
-          No se recibió la variable cve_patch_plan desde el
-          paso anterior del Workflow.
+          No se recibió security_patch_plan desde el paso anterior.
 
-    - name: Obtener plan de parcheo correspondiente al servidor
+    - name: Obtener plan correspondiente al host
       ansible.builtin.set_fact:
-        server_patch_plan: >-
-          {{
-            cve_patch_plan[inventory_hostname]
-            if inventory_hostname in cve_patch_plan
-            else {}
-          }}
+        host_patch_plan: "{{ security_patch_plan[inventory_hostname] }}"
 
-    - name: Validar que el servidor tenga información de parcheo
-      ansible.builtin.assert:
-        that:
-          - server_patch_plan | length > 0
-        fail_msg: >
-          No existe información de parcheo para
-          {{ inventory_hostname }}.
-
-    - name: Mostrar plan recibido
+    - name: Mostrar parches que serán aplicados
       ansible.builtin.debug:
         msg:
-          - "Servidor: {{ inventory_hostname }}"
-          - "CVE: {{ server_patch_plan.cve }}"
-          - "Parches requeridos: {{ server_patch_plan.patches_required }}"
-          - "Paquetes a instalar: {{ server_patch_plan.packages }}"
+          - "Host: {{ inventory_hostname }}"
+          - "CVE: {{ host_patch_plan.cves }}"
+          - "RHSA: {{ host_patch_plan.rhsas }}"
+          - "Paquetes: {{ host_patch_plan.packages }}"
 
-    - name: Aplicar paquetes que mitigan el CVE
+    - name: Aplicar únicamente los paquetes detectados
       ansible.builtin.dnf:
-        name: "{{ server_patch_plan.packages }}"
+        name: "{{ host_patch_plan.packages }}"
         state: present
         update_only: true
-      register: patch_result
       when:
-        - server_patch_plan.patches_required | bool
-        - server_patch_plan.packages | length > 0
+        - host_patch_plan.patches_required | bool
+        - host_patch_plan.packages | length > 0
 
-    - name: Mostrar resultado de instalación
-      ansible.builtin.debug:
-        var: patch_result
-      when:
-        - server_patch_plan.patches_required | bool
-        - server_patch_plan.packages | length > 0
-
-    - name: Informar que no se requieren actualizaciones
+    - name: Informar que no existen actualizaciones de seguridad
       ansible.builtin.debug:
         msg: >
           El servidor {{ inventory_hostname }}
-          no requiere parches para {{ server_patch_plan.cve }}.
+          no tiene actualizaciones de seguridad pendientes.
       when:
-        - not server_patch_plan.patches_required | bool
-
-    #
-    # VALIDACIÓN POST-PARCHE
-    #
-
-    - name: Validar nuevamente el CVE después del parche
-      ansible.builtin.command:
-        cmd: >-
-          dnf -q updateinfo list updates
-          --cve {{ server_patch_plan.cve }}
-      register: post_patch_check
-      changed_when: false
-      failed_when: false
-
-    - name: Mostrar validación post-parche
-      ansible.builtin.debug:
-        msg:
-          - "Servidor: {{ inventory_hostname }}"
-          - "CVE: {{ server_patch_plan.cve }}"
-          - "Actualizaciones pendientes:"
-          - "{{ post_patch_check.stdout_lines }}"
-
-    - name: Determinar si todavía existen parches pendientes
-      ansible.builtin.set_fact:
-        cve_still_vulnerable: >-
-          {{
-            post_patch_check.stdout_lines
-            | select('search', 'RHSA-')
-            | list
-            | length > 0
-          }}
-
-    - name: Resultado final
-      ansible.builtin.debug:
-        msg: >-
-          {% if cve_still_vulnerable %}
-          ATENCION: todavía existen actualizaciones disponibles
-          asociadas a {{ server_patch_plan.cve }}.
-          {% else %}
-          OK: no existen actualizaciones pendientes asociadas a
-          {{ server_patch_plan.cve }}.
-          {% endif %}
-
-    - name: Registrar resultado final como artifact
-      ansible.builtin.set_stats:
-        data:
-          cve_remediation_result:
-            host: "{{ inventory_hostname }}"
-            cve: "{{ server_patch_plan.cve }}"
-            packages: "{{ server_patch_plan.packages }}"
-            vulnerable_after_patch: "{{ cve_still_vulnerable }}"
+        - not host_patch_plan.patches_required | bool
