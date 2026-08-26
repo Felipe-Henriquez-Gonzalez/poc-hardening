@@ -1,149 +1,142 @@
 ---
-- name: Detectar parches disponibles para un CVE en RHEL
-  hosts: linux
+- name: Detectar todos los CVE y parches de seguridad disponibles en RHEL
+  hosts: all
   become: true
   gather_facts: true
 
-  vars:
-    # Debe ser entregado desde AAP, Survey o extra_vars
-    # Ejemplo:
-    # cve_id: CVE-2025-32462
-    cve_id: "{{ cve_id }}"
-
   tasks:
 
-    - name: Validar que el sistema sea Red Hat Enterprise Linux
+    - name: Validar que el sistema sea RHEL
       ansible.builtin.assert:
         that:
           - ansible_distribution == "RedHat"
         fail_msg: >
-          Este playbook solamente está diseñado para Red Hat Enterprise Linux.
+          Este playbook está diseñado para Red Hat Enterprise Linux.
           Sistema detectado: {{ ansible_distribution }}
-        success_msg: >
-          Sistema RHEL {{ ansible_distribution_version }} detectado.
-
-    - name: Validar formato del CVE
-      ansible.builtin.assert:
-        that:
-          - cve_id is defined
-          - cve_id | length > 0
-          - cve_id is match("^CVE-[0-9]{4}-[0-9]+$")
-        fail_msg: >
-          Debe especificar un CVE válido.
-          Ejemplo: CVE-2025-32462
 
     - name: Actualizar metadata de repositorios
       ansible.builtin.command:
         cmd: dnf -q makecache
       changed_when: false
 
-    - name: Buscar actualizaciones disponibles que corrigen el CVE
+    - name: Obtener todos los security advisories pendientes
       ansible.builtin.command:
-        cmd: "dnf -q updateinfo list updates --cve {{ cve_id }}"
-      register: cve_updateinfo
+        cmd: dnf -q updateinfo list updates security
+      register: security_updates
       changed_when: false
-      failed_when: cve_updateinfo.rc not in [0, 100]
+      failed_when: security_updates.rc not in [0, 100]
 
-    - name: Mostrar información encontrada por DNF
+    - name: Mostrar security advisories detectados
       ansible.builtin.debug:
-        var: cve_updateinfo.stdout_lines
-
-    # La salida normalmente tiene formato:
-    #
-    # RHSA-2025:XXXX Important/Sec. package-version-release.arch
-    #
-    # Tomamos la última columna.
+        var: security_updates.stdout_lines
 
     - name: Inicializar lista de paquetes
       ansible.builtin.set_fact:
-        cve_packages: []
+        security_packages: []
 
-    - name: Extraer paquetes asociados al CVE
+    - name: Extraer paquetes asociados a security advisories
       ansible.builtin.set_fact:
-        cve_packages: >-
+        security_packages: >-
           {{
-            cve_packages +
+            security_packages +
             [item.split()[-1]]
           }}
-      loop: "{{ cve_updateinfo.stdout_lines }}"
+      loop: "{{ security_updates.stdout_lines }}"
       when:
         - item | trim | length > 0
         - item is search("RHSA-")
 
-    - name: Eliminar duplicados
+    - name: Eliminar paquetes duplicados
       ansible.builtin.set_fact:
-        cve_packages: "{{ cve_packages | unique | list }}"
+        security_packages: "{{ security_packages | unique | list }}"
 
-    - name: Determinar si existen parches
+    - name: Obtener detalle completo de los advisories
+      ansible.builtin.command:
+        cmd: dnf -q updateinfo info updates security
+      register: security_updateinfo
+      changed_when: false
+      failed_when: false
+
+    - name: Extraer todos los CVE detectados
       ansible.builtin.set_fact:
-        patches_required: "{{ (cve_packages | length) > 0 }}"
+        detected_cves: >-
+          {{
+            security_updateinfo.stdout
+            | regex_findall('CVE-[0-9]{4}-[0-9]+')
+            | unique
+            | list
+          }}
 
-    - name: Mostrar resultado de análisis
+    - name: Extraer todos los RHSA detectados
+      ansible.builtin.set_fact:
+        detected_rhsas: >-
+          {{
+            security_updateinfo.stdout
+            | regex_findall('RHSA-[0-9]{4}:[0-9]+')
+            | unique
+            | list
+          }}
+
+    - name: Determinar si existen parches de seguridad pendientes
+      ansible.builtin.set_fact:
+        security_patches_required: "{{ security_packages | length > 0 }}"
+
+    - name: Mostrar resumen
       ansible.builtin.debug:
         msg:
-          - "=============================================="
-          - "Servidor: {{ inventory_hostname }}"
-          - "CVE analizado: {{ cve_id }}"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }}"
           - "RHEL: {{ ansible_distribution_version }}"
-          - "Parches requeridos: {{ patches_required }}"
-          - "Cantidad de paquetes: {{ cve_packages | length }}"
-          - "Paquetes: {{ cve_packages }}"
-          - "=============================================="
+          - "CVE detectados: {{ detected_cves | length }}"
+          - "RHSA detectados: {{ detected_rhsas | length }}"
+          - "Paquetes a actualizar: {{ security_packages | length }}"
+          - "CVE: {{ detected_cves }}"
+          - "RHSA: {{ detected_rhsas }}"
+          - "Paquetes: {{ security_packages }}"
+          - "=========================================="
 
-    #
-    # Guardamos la información del host para construir
-    # posteriormente el artifact global.
-    #
-
-    - name: Crear información de parcheo del host
+    - name: Registrar resultado por host
       ansible.builtin.set_fact:
-        host_cve_patch_info:
-          cve: "{{ cve_id }}"
+        host_security_patch_info:
           distribution: "{{ ansible_distribution }}"
           distribution_version: "{{ ansible_distribution_version }}"
-          patches_required: "{{ patches_required }}"
-          packages: "{{ cve_packages }}"
+          cves: "{{ detected_cves }}"
+          rhsas: "{{ detected_rhsas }}"
+          patches_required: "{{ security_patches_required }}"
+          packages: "{{ security_packages }}"
 
 
-#
-# Crear artifact global que será entregado al siguiente Job Template
-#
-
-- name: Crear plan de parcheo para el Workflow
+- name: Crear plan global de parcheo para el Workflow
   hosts: localhost
   gather_facts: false
 
-  vars:
-    cve_patch_plan_build: {}
-
   tasks:
 
-    - name: Inicializar plan de parcheo
+    - name: Inicializar plan
       ansible.builtin.set_fact:
-        cve_patch_plan_build: {}
+        security_patch_plan_build: {}
 
     - name: Construir plan por servidor
       ansible.builtin.set_fact:
-        cve_patch_plan_build: >-
+        security_patch_plan_build: >-
           {{
-            cve_patch_plan_build |
+            security_patch_plan_build |
             combine({
-              item: hostvars[item].host_cve_patch_info
+              item: hostvars[item].host_security_patch_info
             })
           }}
       loop: "{{ groups['all'] }}"
       when:
         - item != 'localhost'
-        - hostvars[item].host_cve_patch_info is defined
+        - hostvars[item].host_security_patch_info is defined
 
-    - name: Mostrar plan completo de parcheo
+    - name: Mostrar plan global
       ansible.builtin.debug:
-        var: cve_patch_plan_build
+        var: security_patch_plan_build
 
-    - name: Publicar artifact para el siguiente paso del Workflow
+    - name: Publicar plan como artifact del Workflow
       ansible.builtin.set_stats:
         data:
-          cve_patch_plan: "{{ cve_patch_plan_build }}"
-          cve_detected: "{{ cve_id }}"
+          security_patch_plan: "{{ security_patch_plan_build }}"
         per_host: false
         aggregate: false
