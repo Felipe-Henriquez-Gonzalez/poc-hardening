@@ -1,0 +1,305 @@
+---
+- name: Validacion de seguridad RHEL
+  hosts: rhel
+  become: true
+  gather_facts: true
+
+  vars:
+    resultados_validacion: []
+
+  tasks:
+
+    # ============================================================
+    # 1. SELinux habilitado
+    # ============================================================
+    - name: Obtener estado de SELinux
+      ansible.builtin.command: getenforce
+      register: selinux_status
+      changed_when: false
+      failed_when: false
+
+    - name: Registrar validacion - SELinux habilitado
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'SELinux habilitado',
+              'estado': 'PASS' if selinux_status.stdout != 'Disabled' else 'FAIL',
+              'detalle': selinux_status.stdout | default('No disponible')
+            }]
+          }}
+
+    # ============================================================
+    # 2. SELinux Enforcing
+    # ============================================================
+    - name: Registrar validacion - SELinux Enforcing
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'SELinux Enforcing',
+              'estado': 'PASS' if selinux_status.stdout == 'Enforcing' else 'FAIL',
+              'detalle': selinux_status.stdout | default('No disponible')
+            }]
+          }}
+
+    # ============================================================
+    # 3. Firewalld instalado
+    # ============================================================
+    - name: Obtener paquetes instalados
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Registrar validacion - Firewalld instalado
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Firewalld instalado',
+              'estado': 'PASS' if 'firewalld' in ansible_facts.packages else 'FAIL',
+              'detalle': (
+                ansible_facts.packages['firewalld'][0].version
+                if 'firewalld' in ansible_facts.packages
+                else 'Paquete no instalado'
+              )
+            }]
+          }}
+
+    # ============================================================
+    # 4 y 5. Firewalld habilitado y activo
+    # ============================================================
+    - name: Obtener informacion de servicios
+      ansible.builtin.service_facts:
+
+    - name: Determinar nombre del servicio firewalld
+      ansible.builtin.set_fact:
+        firewalld_service: "{{ ansible_facts.services['firewalld.service'] | default({}) }}"
+
+    - name: Registrar validacion - Firewalld habilitado
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Firewalld habilitado',
+              'estado': 'PASS'
+                if firewalld_service.get('status', '') == 'enabled'
+                else 'FAIL',
+              'detalle': firewalld_service.get('status', 'Servicio no encontrado')
+            }]
+          }}
+
+    - name: Registrar validacion - Firewalld activo
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Firewalld activo',
+              'estado': 'PASS'
+                if firewalld_service.get('state', '') == 'running'
+                else 'FAIL',
+              'detalle': firewalld_service.get('state', 'Servicio no encontrado')
+            }]
+          }}
+
+    # ============================================================
+    # 6. Actualizaciones de seguridad
+    # ============================================================
+    - name: Buscar actualizaciones de seguridad disponibles
+      ansible.builtin.command:
+        cmd: dnf -q updateinfo list security
+      register: security_updates
+      changed_when: false
+      failed_when: false
+
+    - name: Contar actualizaciones de seguridad
+      ansible.builtin.set_fact:
+        security_update_count: >-
+          {{
+            security_updates.stdout_lines
+            | reject('match', '^Last metadata expiration')
+            | reject('equalto', '')
+            | list
+            | length
+          }}
+
+    - name: Registrar validacion - Actualizaciones de seguridad
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Actualizaciones de seguridad',
+              'estado': 'PASS' if security_update_count | int == 0 else 'FAIL',
+              'detalle': (
+                'No existen actualizaciones de seguridad pendientes'
+                if security_update_count | int == 0
+                else (security_update_count | string) ~ ' actualizaciones de seguridad pendientes'
+              )
+            }]
+          }}
+
+    # ============================================================
+    # 7. Vulnerabilidades
+    # Se utilizan advisories de seguridad disponibles para el host
+    # ============================================================
+    - name: Buscar advisories de seguridad
+      ansible.builtin.command:
+        cmd: dnf -q updateinfo list --security
+      register: security_advisories
+      changed_when: false
+      failed_when: false
+
+    - name: Contar advisories de seguridad
+      ansible.builtin.set_fact:
+        vulnerability_count: >-
+          {{
+            security_advisories.stdout_lines
+            | select('search', 'RHSA-')
+            | list
+            | length
+          }}
+
+    - name: Registrar validacion - Vulnerabilidades
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Vulnerabilidades',
+              'estado': 'PASS' if vulnerability_count | int == 0 else 'FAIL',
+              'detalle': (
+                'No se detectan RHSA pendientes'
+                if vulnerability_count | int == 0
+                else (vulnerability_count | string) ~ ' advisories RHSA pendientes'
+              )
+            }]
+          }}
+
+    # ============================================================
+    # 8. Root UID
+    # ============================================================
+    - name: Obtener UID de root
+      ansible.builtin.command:
+        cmd: id -u root
+      register: root_uid
+      changed_when: false
+      failed_when: false
+
+    - name: Registrar validacion - Root UID
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Root UID',
+              'estado': 'PASS' if root_uid.stdout == '0' else 'FAIL',
+              'detalle': 'UID root = ' ~ root_uid.stdout
+            }]
+          }}
+
+    # ============================================================
+    # 9. Usuarios UID 0
+    # ============================================================
+    - name: Obtener usuarios con UID 0
+      ansible.builtin.shell: |
+        awk -F: '($3 == 0) {print $1}' /etc/passwd
+      register: uid_zero_users
+      changed_when: false
+
+    - name: Registrar validacion - Usuarios UID 0
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Usuarios UID 0',
+              'estado': 'PASS'
+                if uid_zero_users.stdout_lines | length == 1
+                   and 'root' in uid_zero_users.stdout_lines
+                else 'FAIL',
+              'detalle': 'Usuarios UID 0: ' ~ (uid_zero_users.stdout_lines | join(', '))
+            }]
+          }}
+
+    # ============================================================
+    # 10. Administradores
+    # Se consideran administradores los miembros del grupo wheel
+    # ============================================================
+    - name: Obtener integrantes del grupo wheel
+      ansible.builtin.command:
+        cmd: getent group wheel
+      register: wheel_group
+      changed_when: false
+      failed_when: false
+
+    - name: Extraer administradores
+      ansible.builtin.set_fact:
+        administradores: >-
+          {{
+            (
+              wheel_group.stdout.split(':')[3].split(',')
+              if wheel_group.rc == 0
+              and wheel_group.stdout.split(':') | length > 3
+              and wheel_group.stdout.split(':')[3] | length > 0
+              else []
+            )
+          }}
+
+    - name: Registrar validacion - Administradores
+      ansible.builtin.set_fact:
+        resultados_validacion: >-
+          {{
+            resultados_validacion +
+            [{
+              'control': 'Administradores',
+              'estado': 'PASS',
+              'detalle': (
+                'Miembros de wheel: ' ~ (administradores | join(', '))
+                if administradores | length > 0
+                else 'No existen usuarios adicionales en wheel'
+              )
+            }]
+          }}
+
+    # ============================================================
+    # RESUMEN
+    # ============================================================
+    - name: Mostrar resultado de validacion
+      ansible.builtin.debug:
+        msg:
+          - "=========================================================="
+          - " VALIDACION DE SEGURIDAD RHEL"
+          - " Host: {{ inventory_hostname }}"
+          - " Sistema: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "=========================================================="
+          - "{{ resultados_validacion }}"
+          - "=========================================================="
+
+    - name: Mostrar resumen individual
+      ansible.builtin.debug:
+        msg: "{{ item.estado }} | {{ item.control }} | {{ item.detalle }}"
+      loop: "{{ resultados_validacion }}"
+      loop_control:
+        label: "{{ item.control }}"
+
+    - name: Contar controles PASS
+      ansible.builtin.set_fact:
+        total_pass: "{{ resultados_validacion | selectattr('estado', 'equalto', 'PASS') | list | length }}"
+        total_fail: "{{ resultados_validacion | selectattr('estado', 'equalto', 'FAIL') | list | length }}"
+
+    - name: Mostrar resumen final
+      ansible.builtin.debug:
+        msg:
+          - "=========================================================="
+          - " RESUMEN FINAL"
+          - "=========================================================="
+          - "Host             : {{ inventory_hostname }}"
+          - "Total controles  : {{ resultados_validacion | length }}"
+          - "PASS             : {{ total_pass }}"
+          - "FAIL             : {{ total_fail }}"
+          - "=========================================================="
