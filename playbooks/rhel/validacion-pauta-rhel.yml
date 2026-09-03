@@ -1,6 +1,6 @@
 ---
 - name: Validacion de seguridad RHEL
-  hosts: rhel
+  hosts: linux
   become: true
   gather_facts: true
 
