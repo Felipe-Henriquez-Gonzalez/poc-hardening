@@ -1,0 +1,58 @@
+---
+- name: Aplicar parches de seguridad en servidores RHEL
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Validar que el sistema operativo sea Red Hat Enterprise Linux
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == "RedHat"
+        fail_msg: "El servidor {{ inventory_hostname }} no es RHEL."
+        success_msg: "Servidor RHEL detectado: {{ ansible_facts['distribution_version'] }}"
+
+    - name: Actualizar metadata de repositorios
+      ansible.builtin.dnf:
+        update_cache: true
+
+    - name: Consultar actualizaciones de seguridad disponibles
+      ansible.builtin.command:
+        cmd: dnf updateinfo list security
+      register: security_updates
+      changed_when: false
+      failed_when: false
+
+    - name: Mostrar actualizaciones de seguridad disponibles
+      ansible.builtin.debug:
+        var: security_updates.stdout_lines
+
+    - name: Aplicar todas las actualizaciones de seguridad disponibles
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        security: true
+      register: patch_result
+
+    - name: Mostrar resultado del parchado
+      ansible.builtin.debug:
+        msg: >-
+          Resultado del parchado en {{ inventory_hostname }}:
+          {{ 'Se instalaron actualizaciones de seguridad.'
+             if patch_result.changed
+             else 'No había actualizaciones de seguridad pendientes.' }}
+
+    - name: Verificar si el servidor requiere reinicio
+      ansible.builtin.command:
+        cmd: dnf needs-restarting -r
+      register: reboot_required
+      changed_when: false
+      failed_when: reboot_required.rc not in [0, 1]
+
+    - name: Mostrar estado de reinicio
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'El servidor requiere reinicio.'
+             if reboot_required.rc == 1
+             else 'El servidor no requiere reinicio.' }}
