@@ -1,0 +1,40 @@
+---
+- name: Listar paquetes disponibles para actualización en RHEL
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Validar que el sistema sea Red Hat
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "RedHat"
+        fail_msg: "Este playbook está diseñado para sistemas RHEL/Red Hat."
+        success_msg: "Sistema Red Hat detectado."
+
+    - name: Consultar paquetes disponibles para actualización
+      ansible.builtin.command:
+        cmd: dnf check-update
+      register: dnf_updates
+      changed_when: false
+
+      # dnf check-update retorna:
+      # 0   = no existen actualizaciones
+      # 100 = existen actualizaciones
+      # otro = error
+      failed_when:
+        - dnf_updates.rc != 0
+        - dnf_updates.rc != 100
+
+    - name: Mostrar paquetes disponibles para actualización
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          PAQUETES DISPONIBLES PARA ACTUALIZACIÓN
+          Host: {{ inventory_hostname }}
+          ============================================================
+
+          {{ dnf_updates.stdout }}
+
+          ============================================================
