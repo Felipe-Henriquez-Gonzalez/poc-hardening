@@ -1,0 +1,47 @@
+---
+- name: Instalar CrowdStrike Falcon Sensor en RHEL
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    falcon_script_local: "falcon-linux-install.sh"
+    falcon_script_remote: "/tmp/falcon-linux-install.sh"
+    falcon_cloud: "us-1"
+
+  tasks:
+
+    - name: Validar que el sistema operativo sea Red Hat
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "RedHat"
+        fail_msg: "Este playbook solo está diseñado para sistemas Red Hat."
+        success_msg: "Sistema Red Hat detectado correctamente."
+
+    - name: Copiar instalador Falcon al servidor
+      ansible.builtin.copy:
+        src: "{{ falcon_script_local }}"
+        dest: "{{ falcon_script_remote }}"
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Ejecutar instalador Falcon
+      ansible.builtin.command:
+        cmd: "{{ falcon_script_remote }}"
+      environment:
+        ALLOW_LEGACY_CURL: "true"
+        FALCON_CLIENT_ID: "{{ falcon_client_id }}"
+        FALCON_CLIENT_SECRET: "{{ falcon_client_secret }}"
+        FALCON_CLOUD: "{{ falcon_cloud }}"
+      register: falcon_install
+      no_log: true
+
+    - name: Eliminar instalador temporal
+      ansible.builtin.file:
+        path: "{{ falcon_script_remote }}"
+        state: absent
+
+    - name: Mostrar resultado de instalación
+      ansible.builtin.debug:
+        msg: "Instalación de CrowdStrike Falcon finalizada."
