@@ -1,0 +1,23 @@
+---
+- name: Validar instalación de CrowdStrike Falcon Sensor
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Verificar si falcon-sensor está instalado
+      ansible.builtin.command:
+        cmd: rpm -q falcon-sensor
+      register: falcon_sensor_check
+      changed_when: false
+      failed_when: false
+
+    - name: Mostrar estado de Falcon Sensor
+      ansible.builtin.debug:
+        msg: >-
+          {% if falcon_sensor_check.rc == 0 %}
+          OK - Falcon Sensor está instalado: {{ falcon_sensor_check.stdout }}
+          {% else %}
+          ALERTA - Falcon Sensor NO está instalado.
+          {% endif %}
