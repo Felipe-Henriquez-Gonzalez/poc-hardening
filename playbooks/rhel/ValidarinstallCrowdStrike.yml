@@ -1,6 +1,6 @@
 ---
 - name: Validar instalación de CrowdStrike Falcon Sensor
-  hosts: all
+  hosts: linux
   become: true
   gather_facts: false
 
