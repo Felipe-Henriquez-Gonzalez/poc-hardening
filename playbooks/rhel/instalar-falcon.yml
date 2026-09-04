@@ -1,6 +1,6 @@
 ---
 - name: Instalar CrowdStrike Falcon Sensor en RHEL
-  hosts: all
+  hosts: linux
   become: true
   gather_facts: true
 
