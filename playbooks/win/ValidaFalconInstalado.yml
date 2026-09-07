@@ -1,0 +1,28 @@
+---
+- name: Validar CrowdStrike Falcon Sensor en Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Consultar servicio de CrowdStrike Falcon Sensor
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_service
+
+    - name: Mostrar estado si CrowdStrike está instalado
+      ansible.builtin.debug:
+        msg:
+          - "CrowdStrike Falcon Sensor está instalado."
+          - "Servicio: CSFalconService"
+          - "Estado: {{ falcon_service.services[0].state }}"
+          - "Modo de inicio: {{ falcon_service.services[0].start_mode }}"
+      when:
+        - falcon_service.services is defined
+        - falcon_service.services | length > 0
+
+    - name: Mostrar mensaje si CrowdStrike no está instalado
+      ansible.builtin.debug:
+        msg: "CrowdStrike Falcon Sensor NO está instalado."
+      when:
+        - falcon_service.services is not defined or falcon_service.services | length == 0
