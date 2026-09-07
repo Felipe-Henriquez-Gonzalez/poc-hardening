@@ -1,0 +1,44 @@
+---
+- name: Instalar CrowdStrike Falcon Sensor en Windows
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    falcon_installer_path: 'C:\tmp\FalconSensor_Windows.exe'
+
+  tasks:
+
+    - name: Verificar que la variable falcon_cid esté definida
+      ansible.builtin.assert:
+        that:
+          - falcon_cid is defined
+          - falcon_cid | length > 0
+        fail_msg: "La variable falcon_cid debe ser proporcionada externamente."
+
+    - name: Verificar que exista el instalador de Falcon Sensor
+      ansible.windows.win_stat:
+        path: "{{ falcon_installer_path }}"
+      register: falcon_installer
+
+    - name: Detener ejecución si no existe el instalador
+      ansible.builtin.fail:
+        msg: "No se encontró el instalador en {{ falcon_installer_path }}"
+      when: not falcon_installer.stat.exists
+
+    - name: Instalar CrowdStrike Falcon Sensor
+      ansible.windows.win_command: >
+        "{{ falcon_installer_path }}"
+        /install
+        /quiet
+        /norestart
+        CID={{ falcon_cid }}
+      register: falcon_install
+      changed_when: falcon_install.rc in [0, 3010]
+      failed_when: falcon_install.rc not in [0, 3010]
+
+    - name: Mostrar resultado de la instalación
+      ansible.builtin.debug:
+        msg:
+          - "Código de retorno: {{ falcon_install.rc }}"
+          - "STDOUT: {{ falcon_install.stdout | default('') }}"
+          - "STDERR: {{ falcon_install.stderr | default('') }}"
