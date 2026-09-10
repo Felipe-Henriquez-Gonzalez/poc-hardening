@@ -1,0 +1,121 @@
+---
+- name: Reporte de privilegios administrativos en Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Obtener miembros del grupo local Administradores
+      ansible.windows.win_powershell:
+        script: |
+          $group = Get-LocalGroup -SID "S-1-5-32-544"
+
+          $members = Get-LocalGroupMember -Group $group.Name | ForEach-Object {
+              [PSCustomObject]@{
+                  Name            = $_.Name
+                  ObjectClass     = $_.ObjectClass
+                  PrincipalSource = $_.PrincipalSource.ToString()
+                  SID             = $_.SID.Value
+              }
+          }
+
+          $members | ConvertTo-Json -Depth 3
+      register: admin_members_raw
+
+    - name: Convertir resultado a estructura Ansible
+      ansible.builtin.set_fact:
+        admin_members: >-
+          {{
+            (
+              admin_members_raw.output[0] | from_json
+            )
+            if (admin_members_raw.output[0] | from_json) is sequence
+            and (admin_members_raw.output[0] | from_json) is not string
+            else
+            [admin_members_raw.output[0] | from_json]
+          }}
+
+    - name: Identificar usuarios locales con privilegios administrativos
+      ansible.builtin.set_fact:
+        local_admin_users: >-
+          {{
+            admin_members
+            | selectattr('ObjectClass', 'equalto', 'User')
+            | selectattr('PrincipalSource', 'equalto', 'Local')
+            | list
+          }}
+
+    - name: Identificar usuarios de dominio con privilegios administrativos
+      ansible.builtin.set_fact:
+        domain_admin_users: >-
+          {{
+            admin_members
+            | selectattr('ObjectClass', 'equalto', 'User')
+            | rejectattr('PrincipalSource', 'equalto', 'Local')
+            | list
+          }}
+
+    - name: Identificar grupos con privilegios administrativos
+      ansible.builtin.set_fact:
+        admin_groups: >-
+          {{
+            admin_members
+            | selectattr('ObjectClass', 'equalto', 'Group')
+            | list
+          }}
+
+    - name: Mostrar resumen ejecutivo
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - " REPORTE DE PRIVILEGIOS ADMINISTRATIVOS"
+          - " Servidor: {{ inventory_hostname }}"
+          - "============================================================"
+          - ""
+          - "USUARIOS LOCALES CON PRIVILEGIOS DE ADMINISTRADOR"
+          - >-
+            {{
+              local_admin_users
+              | map(attribute='Name')
+              | list
+              if local_admin_users | length > 0
+              else ['No se encontraron usuarios locales con privilegios administrativos']
+            }}
+          - ""
+          - "Cantidad: {{ local_admin_users | length }}"
+          - ""
+          - "------------------------------------------------------------"
+          - ""
+          - "USUARIOS DE DOMINIO CON PRIVILEGIOS DE ADMINISTRADOR"
+          - >-
+            {{
+              domain_admin_users
+              | map(attribute='Name')
+              | list
+              if domain_admin_users | length > 0
+              else ['No se encontraron usuarios de dominio con privilegios administrativos']
+            }}
+          - ""
+          - "Cantidad: {{ domain_admin_users | length }}"
+          - ""
+          - "------------------------------------------------------------"
+          - ""
+          - "GRUPOS CON PRIVILEGIOS DE ADMINISTRADOR"
+          - >-
+            {{
+              admin_groups
+              | map(attribute='Name')
+              | list
+              if admin_groups | length > 0
+              else ['No se encontraron grupos con privilegios administrativos']
+            }}
+          - ""
+          - "Cantidad: {{ admin_groups | length }}"
+          - ""
+          - "============================================================"
+          - " RESUMEN"
+          - " Usuarios locales administradores : {{ local_admin_users | length }}"
+          - " Usuarios de dominio administradores: {{ domain_admin_users | length }}"
+          - " Grupos administradores           : {{ admin_groups | length }}"
+          - " Total miembros grupo Administradores: {{ admin_members | length }}"
+          - "============================================================"
