@@ -1,0 +1,115 @@
+---
+- name: Buscar y ejecutar CsUninstallTool.exe en rutas habituales
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    falcon_search_paths:
+      - 'C:\Program Files\CrowdStrike'
+      - 'C:\Program Files (x86)\CrowdStrike'
+      - 'C:\CrowdStrike'
+      - 'C:\Temp'
+      - 'C:\Windows\Temp'
+      - 'C:\Users\Public\Downloads'
+
+  tasks:
+
+    - name: Buscar CsUninstallTool.exe en rutas habituales
+      ansible.windows.win_powershell:
+        script: |
+          $searchPaths = @(
+          {% for path in falcon_search_paths %}
+            '{{ path }}'{% if not loop.last %},{% endif %}
+          {% endfor %}
+          )
+
+          $results = @()
+
+          foreach ($path in $searchPaths) {
+              if (Test-Path $path) {
+                  $found = Get-ChildItem `
+                      -Path $path `
+                      -Filter "CsUninstallTool.exe" `
+                      -File `
+                      -Recurse `
+                      -Force `
+                      -ErrorAction SilentlyContinue
+
+                  foreach ($file in $found) {
+                      $results += $file.FullName
+                  }
+              }
+          }
+
+          $Ansible.Result = $results
+      register: falcon_tool_search
+
+    - name: Mostrar archivos encontrados
+      ansible.builtin.debug:
+        var: falcon_tool_search.result
+
+    - name: Fallar si no se encuentra CsUninstallTool.exe
+      ansible.builtin.fail:
+        msg: >
+          No se encontró CsUninstallTool.exe en las rutas habituales:
+          {{ falcon_search_paths | join(', ') }}
+      when: falcon_tool_search.result | length == 0
+
+    - name: Seleccionar primer CsUninstallTool.exe encontrado
+      ansible.builtin.set_fact:
+        falcon_uninstall_tool: "{{ falcon_tool_search.result[0] }}"
+      when: falcon_tool_search.result | length > 0
+
+    - name: Obtener directorio del ejecutable
+      ansible.builtin.set_fact:
+        falcon_uninstall_directory: >-
+          {{ falcon_uninstall_tool | regex_replace('\\\\[^\\\\]+$', '') }}
+
+    - name: Mostrar herramienta seleccionada
+      ansible.builtin.debug:
+        msg:
+          - "Ejecutable encontrado: {{ falcon_uninstall_tool }}"
+          - "Directorio de ejecución: {{ falcon_uninstall_directory }}"
+          - "Comando: CsUninstallTool.exe /quiet"
+
+    - name: Verificar estado de Falcon antes de desinstalar
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_before
+      failed_when: false
+
+    - name: Ejecutar CsUninstallTool.exe
+      ansible.windows.win_command:
+        cmd: '"{{ falcon_uninstall_tool }}" /quiet'
+        chdir: "{{ falcon_uninstall_directory }}"
+      register: falcon_uninstall
+      when: falcon_before.exists | default(false)
+      failed_when: falcon_uninstall.rc not in [0, 3010]
+
+    - name: Mostrar resultado de la ejecución
+      ansible.builtin.debug:
+        msg:
+          - "Return Code: {{ falcon_uninstall.rc | default('No ejecutado') }}"
+          - "STDOUT: {{ falcon_uninstall.stdout | default('') }}"
+          - "STDERR: {{ falcon_uninstall.stderr | default('') }}"
+
+    - name: Esperar después de la desinstalación
+      ansible.builtin.pause:
+        seconds: 10
+      when: falcon_before.exists | default(false)
+
+    - name: Verificar Falcon después de la desinstalación
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_after
+      failed_when: false
+
+    - name: Resultado final
+      ansible.builtin.debug:
+        msg: >-
+          {% if falcon_after.exists | default(false) %}
+          FAILED: CrowdStrike Falcon Sensor continúa instalado.
+          Revisar Maintenance Token o protección contra desinstalación.
+          {% else %}
+          OK: CrowdStrike Falcon Sensor fue desinstalado correctamente.
+          {% endif %}
