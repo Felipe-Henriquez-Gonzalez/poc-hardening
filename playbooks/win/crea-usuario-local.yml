@@ -1,0 +1,65 @@
+---
+- name: Crear usuario local en Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Validar variables recibidas desde AAP
+      ansible.builtin.assert:
+        that:
+          - usuario_local is defined
+          - usuario_local | length > 0
+          - password_local is defined
+          - password_local | length > 0
+        fail_msg: "Debe indicar el nombre de usuario y contraseña en la encuesta de AAP."
+        success_msg: "Variables recibidas correctamente."
+      no_log: true
+
+    - name: Crear usuario local
+      ansible.windows.win_user:
+        name: "{{ usuario_local }}"
+        password: "{{ password_local }}"
+        state: present
+        account_disabled: false
+        password_never_expires: false
+        user_cannot_change_password: false
+        description: "Usuario creado mediante Ansible Automation Platform"
+      no_log: true
+
+    - name: Agregar usuario al grupo Administradores
+      ansible.windows.win_group_membership:
+        name: "S-1-5-32-544"
+        members:
+          - "{{ usuario_local }}"
+        state: present
+      when: administrador | default(false) | bool
+
+    - name: Obtener información del usuario creado
+      ansible.windows.win_powershell:
+        script: |
+          $User = Get-LocalUser -Name "{{ usuario_local }}"
+
+          [PSCustomObject]@{
+              Usuario    = $User.Name
+              Habilitado = $User.Enabled
+              Descripcion = $User.Description
+              Administrador = [bool](
+                  Get-LocalGroupMember -SID "S-1-5-32-544" |
+                  Where-Object { $_.SID -eq $User.SID }
+              )
+          } | ConvertTo-Json
+      register: usuario_resultado
+      changed_when: false
+
+    - name: Mostrar resumen
+      ansible.builtin.debug:
+        msg:
+          - "=============================================="
+          - " CREACIÓN DE USUARIO LOCAL"
+          - "=============================================="
+          - "Servidor     : {{ inventory_hostname }}"
+          - "Usuario      : {{ usuario_local }}"
+          - "Estado       : Creado / Verificado"
+          - "Administrador: {{ 'SI' if administrador | default(false) | bool else 'NO' }}"
+          - "=============================================="
