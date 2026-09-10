@@ -1,0 +1,31 @@
+---
+- name: Reporte de miembros del grupo Administradores
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Obtener nombre localizado del grupo Administrators
+      ansible.windows.win_powershell:
+        script: |
+          $group = Get-LocalGroup -SID "S-1-5-32-544"
+          $group.Name
+      register: admin_group
+
+    - name: Obtener miembros del grupo Administradores
+      ansible.windows.win_powershell:
+        script: |
+          $group = Get-LocalGroup -SID "S-1-5-32-544"
+
+          Get-LocalGroupMember -Group $group.Name |
+          Select-Object Name, ObjectClass, PrincipalSource, SID |
+          ConvertTo-Json -Depth 3
+      register: administrators_members
+
+    - name: Mostrar grupo Administradores detectado
+      ansible.builtin.debug:
+        msg: "Grupo administrativo detectado: {{ admin_group.output[0] }}"
+
+    - name: Mostrar miembros del grupo Administradores
+      ansible.builtin.debug:
+        msg: "{{ administrators_members.output[0] | from_json }}"
