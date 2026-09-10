@@ -1,0 +1,225 @@
+---
+- name: Reporte de usuarios, grupos y administradores en Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Obtener información de usuarios y grupos
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = "SilentlyContinue"
+
+          $computer = $env:COMPUTERNAME
+          $resultados = @()
+
+          # Obtener todos los usuarios locales
+          $usuariosLocales = Get-LocalUser
+
+          # Obtener todos los grupos locales
+          $gruposLocales = Get-LocalGroup
+
+          # Construir mapa de membresías
+          $membresias = @{}
+
+          foreach ($grupo in $gruposLocales) {
+
+              $miembros = Get-LocalGroupMember -Group $grupo.Name
+
+              foreach ($miembro in $miembros) {
+
+                  $nombre = $miembro.Name
+
+                  if (-not $membresias.ContainsKey($nombre)) {
+                      $membresias[$nombre] = @()
+                  }
+
+                  $membresias[$nombre] += $grupo.Name
+              }
+          }
+
+          # Obtener miembros del grupo Administrators
+          $admins = @()
+
+          try {
+              $admins = Get-LocalGroupMember -Group "Administrators" |
+                        Select-Object -ExpandProperty Name
+          }
+          catch {
+              try {
+                  $admins = Get-LocalGroupMember -Group "Administradores" |
+                            Select-Object -ExpandProperty Name
+              }
+              catch {}
+          }
+
+          # ============================================================
+          # USUARIOS LOCALES
+          # ============================================================
+
+          foreach ($usuario in $usuariosLocales) {
+
+              $nombreCompleto = "$computer\$($usuario.Name)"
+
+              $grupos = @()
+
+              if ($membresias.ContainsKey($nombreCompleto)) {
+                  $grupos = $membresias[$nombreCompleto]
+              }
+
+              $esAdmin = $false
+
+              if ($admins -contains $nombreCompleto) {
+                  $esAdmin = $true
+              }
+
+              $resultados += [PSCustomObject]@{
+                  Usuario       = $usuario.Name
+                  Tipo          = "LOCAL"
+                  Habilitado    = $usuario.Enabled
+                  Administrador = if ($esAdmin) { "SI" } else { "NO" }
+                  Grupos        = ($grupos -join ", ")
+              }
+          }
+
+          # ============================================================
+          # USUARIOS / GRUPOS DE DOMINIO PRESENTES EN GRUPOS LOCALES
+          # ============================================================
+
+          foreach ($entrada in $membresias.Keys) {
+
+              # Ignorar cuentas locales ya procesadas
+              if ($entrada -like "$computer\*") {
+                  continue
+              }
+
+              $tipo = "DOMINIO"
+
+              # Revisar si el objeto es grupo o usuario
+              $objeto = $null
+
+              foreach ($grupoLocal in $gruposLocales) {
+
+                  $objeto = Get-LocalGroupMember -Group $grupoLocal.Name |
+                            Where-Object { $_.Name -eq $entrada } |
+                            Select-Object -First 1
+
+                  if ($objeto) {
+                      break
+                  }
+              }
+
+              if ($objeto.ObjectClass -eq "Group") {
+                  $tipo = "GRUPO DOMINIO"
+              }
+              elseif ($objeto.ObjectClass -eq "User") {
+                  $tipo = "USUARIO DOMINIO"
+              }
+
+              $esAdmin = $false
+
+              if ($admins -contains $entrada) {
+                  $esAdmin = $true
+              }
+
+              $resultados += [PSCustomObject]@{
+                  Usuario       = $entrada
+                  Tipo          = $tipo
+                  Habilitado    = "N/A"
+                  Administrador = if ($esAdmin) { "SI" } else { "NO" }
+                  Grupos        = ($membresias[$entrada] -join ", ")
+              }
+          }
+
+          # ============================================================
+          # RESUMEN
+          # ============================================================
+
+          $total = $resultados.Count
+
+          $locales = (
+              $resultados |
+              Where-Object { $_.Tipo -eq "LOCAL" }
+          ).Count
+
+          $usuariosDominio = (
+              $resultados |
+              Where-Object { $_.Tipo -eq "USUARIO DOMINIO" }
+          ).Count
+
+          $gruposDominio = (
+              $resultados |
+              Where-Object { $_.Tipo -eq "GRUPO DOMINIO" }
+          ).Count
+
+          $administradores = (
+              $resultados |
+              Where-Object { $_.Administrador -eq "SI" }
+          ).Count
+
+          $salida = @()
+
+          $salida += ""
+          $salida += "=========================================================================="
+          $salida += "                 REPORTE DE USUARIOS WINDOWS"
+          $salida += "=========================================================================="
+          $salida += ""
+          $salida += "Servidor : $computer"
+          $salida += ""
+          $salida += "--------------------------------------------------------------------------"
+          $salida += "RESUMEN"
+          $salida += "--------------------------------------------------------------------------"
+          $salida += ""
+          $salida += "Total objetos encontrados : $total"
+          $salida += "Usuarios locales          : $locales"
+          $salida += "Usuarios de dominio       : $usuariosDominio"
+          $salida += "Grupos de dominio         : $gruposDominio"
+          $salida += "Administradores           : $administradores"
+          $salida += ""
+          $salida += "=========================================================================="
+          $salida += "DETALLE"
+          $salida += "=========================================================================="
+          $salida += ""
+
+          foreach ($item in ($resultados | Sort-Object Tipo,Usuario)) {
+
+              $salida += "Usuario       : $($item.Usuario)"
+              $salida += "Tipo          : $($item.Tipo)"
+              $salida += "Habilitado    : $($item.Habilitado)"
+              $salida += "Administrador : $($item.Administrador)"
+
+              if ([string]::IsNullOrWhiteSpace($item.Grupos)) {
+                  $salida += "Grupos        : Sin grupos locales asociados"
+              }
+              else {
+                  $salida += "Grupos        : $($item.Grupos)"
+              }
+
+              $salida += "--------------------------------------------------------------------------"
+          }
+
+          $salida += ""
+          $salida += "=========================================================================="
+          $salida += "ADMINISTRADORES"
+          $salida += "=========================================================================="
+          $salida += ""
+
+          foreach ($item in ($resultados | Where-Object {
+              $_.Administrador -eq "SI"
+          })) {
+
+              $salida += "$($item.Usuario) [$($item.Tipo)]"
+          }
+
+          $salida += ""
+          $salida += "=========================================================================="
+          $salida += "FIN DEL REPORTE"
+          $salida += "=========================================================================="
+
+          $Ansible.Result = $salida
+
+      register: reporte_usuarios
+
+    - name: Mostrar reporte
+      ansible.builtin.debug:
+        msg: "{{ reporte_usuarios.result }}"
