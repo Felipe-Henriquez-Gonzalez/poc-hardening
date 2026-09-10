@@ -1,0 +1,62 @@
+---
+- name: Desinstalar CrowdStrike Falcon Sensor en Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Buscar CrowdStrike Falcon Sensor instalado
+      ansible.windows.win_powershell:
+        script: |
+          $paths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          )
+
+          $falcon = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.DisplayName -match "CrowdStrike.*Falcon|Falcon Sensor"
+            } |
+            Select-Object -First 1
+
+          if ($falcon) {
+              $Ansible.Result = @{
+                  Installed     = $true
+                  DisplayName   = $falcon.DisplayName
+                  DisplayVersion = $falcon.DisplayVersion
+                  ProductCode   = $falcon.PSChildName
+              }
+          }
+          else {
+              $Ansible.Result = @{
+                  Installed = $false
+              }
+          }
+      register: falcon_check
+
+    - name: Mostrar estado actual
+      ansible.builtin.debug:
+        var: falcon_check.result
+
+    - name: Desinstalar Falcon Sensor
+      ansible.windows.win_package:
+        product_id: "{{ falcon_check.result.ProductCode }}"
+        state: absent
+      when: falcon_check.result.Installed | bool
+      register: falcon_uninstall
+
+    - name: Verificar servicio CSFalconService
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_service
+      failed_when: false
+
+    - name: Resultado final
+      ansible.builtin.debug:
+        msg: >-
+          CrowdStrike Falcon Sensor:
+          {% if falcon_service.exists | default(false) %}
+          El servicio CSFalconService todavía existe.
+          {% else %}
+          Desinstalación completada. CSFalconService no está presente.
+          {% endif %}
