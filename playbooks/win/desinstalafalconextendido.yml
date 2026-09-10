@@ -1,0 +1,78 @@
+---
+- name: Desinstalar CrowdStrike Falcon Sensor en Windows
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    falcon_uninstall_tool_src: "CsUninstallTool.exe"
+    falcon_uninstall_tool_dst: "C:\\Temp\\CsUninstallTool.exe"
+
+  tasks:
+
+    - name: Crear directorio temporal
+      ansible.windows.win_file:
+        path: C:\Temp
+        state: directory
+
+    - name: Copiar CsUninstallTool.exe al servidor Windows
+      ansible.windows.win_copy:
+        src: "{{ falcon_uninstall_tool_src }}"
+        dest: "{{ falcon_uninstall_tool_dst }}"
+
+    - name: Verificar si Falcon Sensor está instalado
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_before
+      failed_when: false
+
+    - name: Mostrar estado inicial
+      ansible.builtin.debug:
+        msg: >-
+          Falcon Sensor
+          {% if falcon_before.exists | default(false) %}
+          está instalado.
+          {% else %}
+          no parece estar instalado.
+          {% endif %}
+
+    - name: Ejecutar herramienta de desinstalación de CrowdStrike
+      ansible.windows.win_command:
+        cmd: '"{{ falcon_uninstall_tool_dst }}" /quiet'
+      register: falcon_uninstall
+      when: falcon_before.exists | default(false)
+      failed_when: falcon_uninstall.rc not in [0, 3010]
+
+    - name: Mostrar resultado del desinstalador
+      ansible.builtin.debug:
+        msg:
+          - "Return code: {{ falcon_uninstall.rc | default('No ejecutado') }}"
+          - "STDOUT: {{ falcon_uninstall.stdout | default('') }}"
+          - "STDERR: {{ falcon_uninstall.stderr | default('') }}"
+      when: falcon_before.exists | default(false)
+
+    - name: Esperar unos segundos después de la desinstalación
+      ansible.builtin.pause:
+        seconds: 10
+      when: falcon_before.exists | default(false)
+
+    - name: Verificar si CSFalconService continúa instalado
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_after
+      failed_when: false
+
+    - name: Resultado final
+      ansible.builtin.debug:
+        msg: >-
+          {% if falcon_after.exists | default(false) %}
+          ADVERTENCIA: CrowdStrike Falcon Sensor todavía está presente.
+          Revisar si la desinstalación requiere Maintenance Token.
+          {% else %}
+          OK: CrowdStrike Falcon Sensor fue desinstalado correctamente.
+          {% endif %}
+
+    - name: Eliminar herramienta temporal
+      ansible.windows.win_file:
+        path: "{{ falcon_uninstall_tool_dst }}"
+        state: absent
+      when: not (falcon_after.exists | default(false))
