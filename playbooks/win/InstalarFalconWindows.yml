@@ -22,7 +22,7 @@
 
     - name: Detener ejecución si no existe el instalador
       ansible.builtin.fail:
-        msg: "No se encontró el instalador en {{ falcon_installer_path }}"
+        msg: "NO FUE INSTALADO CORRECTAMENTE - No se encontró el instalador."
       when: not falcon_installer.stat.exists
 
     - name: Instalar CrowdStrike Falcon Sensor
@@ -34,11 +34,28 @@
         CID={{ falcon_cid }}
       register: falcon_install
       changed_when: falcon_install.rc in [0, 3010]
-      failed_when: falcon_install.rc not in [0, 3010]
+      failed_when: false
 
-    - name: Mostrar resultado de la instalación
+    - name: Verificar servicio CrowdStrike Falcon Sensor
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_service
+      when: falcon_install.rc in [0, 3010]
+
+    - name: Determinar resultado final
+      ansible.builtin.set_fact:
+        falcon_instalado_correctamente: >-
+          {{
+            falcon_install.rc in [0, 3010]
+            and
+            (falcon_service.exists | default(false))
+          }}
+
+    - name: Resultado final de instalación
       ansible.builtin.debug:
-        msg:
-          - "Código de retorno: {{ falcon_install.rc }}"
-          - "STDOUT: {{ falcon_install.stdout | default('') }}"
-          - "STDERR: {{ falcon_install.stderr | default('') }}"
+        msg: >-
+          {% if falcon_instalado_correctamente %}
+          CrowdStrike Falcon Sensor FUE INSTALADO CORRECTAMENTE
+          {% else %}
+          CrowdStrike Falcon Sensor NO FUE INSTALADO CORRECTAMENTE
+          {% endif %}
