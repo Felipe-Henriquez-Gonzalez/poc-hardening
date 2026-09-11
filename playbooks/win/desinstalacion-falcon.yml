@@ -1,0 +1,51 @@
+---
+- name: Desinstalar CrowdStrike Falcon Sensor en Windows
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    falcon_uninstaller_path: 'C:\Program Files\CrowdStrike\CsUninstallTool.exe'
+
+  tasks:
+
+    - name: Validar que el token de desinstalación fue proporcionado
+      ansible.builtin.assert:
+        that:
+          - falcon_uninstall_token is defined
+          - falcon_uninstall_token | length > 0
+        fail_msg: "Debe proporcionar la variable falcon_uninstall_token."
+
+    - name: Verificar si existe CsUninstallTool.exe
+      ansible.windows.win_stat:
+        path: "{{ falcon_uninstaller_path }}"
+      register: falcon_uninstaller
+
+    - name: Detener ejecución si no existe la herramienta de desinstalación
+      ansible.builtin.fail:
+        msg: "No se encontró CsUninstallTool.exe en {{ falcon_uninstaller_path }}"
+      when: not falcon_uninstaller.stat.exists
+
+    - name: Desinstalar CrowdStrike Falcon Sensor
+      ansible.windows.win_command: >
+        "{{ falcon_uninstaller_path }}"
+        /quiet
+        MAINTENANCE_TOKEN={{ falcon_uninstall_token }}
+      register: falcon_uninstall
+      no_log: true
+      changed_when: falcon_uninstall.rc in [0, 3010]
+      failed_when: falcon_uninstall.rc not in [0, 3010]
+
+    - name: Verificar si el servicio CrowdStrike sigue presente
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_service
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg: >-
+          {% if falcon_service.services | length == 0 %}
+          OK - CrowdStrike Falcon Sensor fue desinstalado.
+          {% else %}
+          ADVERTENCIA - El servicio CSFalconService todavía existe.
+          Estado actual: {{ falcon_service.services[0].state }}
+          {% endif %}
