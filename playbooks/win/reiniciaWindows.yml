@@ -1,0 +1,32 @@
+---
+- name: Reiniciar servidores Windows y esperar que vuelvan online
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Reiniciar Windows
+      ansible.windows.win_reboot:
+        msg: "Reinicio ejecutado mediante Ansible Automation Platform"
+        pre_reboot_delay: 5
+        post_reboot_delay: 15
+        reboot_timeout: 900
+      register: reboot_result
+
+    - name: Validar que Windows responde después del reinicio
+      ansible.windows.win_ping:
+      register: ping_result
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          RESULTADO DEL REINICIO
+          ==========================================
+          Servidor: {{ inventory_hostname }}
+          Reinicio: COMPLETADO
+          Estado: ONLINE
+          WinRM: RESPONDIENDO
+          Tiempo de reinicio: {{ reboot_result.elapsed | default('N/A') }} segundos
+          ==========================================
+      when: ping_result is succeeded
