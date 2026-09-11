@@ -4,48 +4,136 @@
   gather_facts: false
 
   vars:
-    falcon_uninstaller_path: 'C:\Program Files\CrowdStrike\CsUninstallTool.exe'
+    falcon_script_src: "falcon_windows_uninstall.ps1"
+    falcon_script_dest: 'C:\tmp\falcon_windows_uninstall.ps1'
 
   tasks:
 
-    - name: Validar que el token de desinstalación fue proporcionado
+    # ---------------------------------------------------------
+    # 1. Validar token
+    # ---------------------------------------------------------
+
+    - name: Validar que se proporcionó el token de desinstalación
       ansible.builtin.assert:
         that:
           - falcon_uninstall_token is defined
           - falcon_uninstall_token | length > 0
         fail_msg: "Debe proporcionar la variable falcon_uninstall_token."
-
-    - name: Verificar si existe CsUninstallTool.exe
-      ansible.windows.win_stat:
-        path: "{{ falcon_uninstaller_path }}"
-      register: falcon_uninstaller
-
-    - name: Detener ejecución si no existe la herramienta de desinstalación
-      ansible.builtin.fail:
-        msg: "No se encontró CsUninstallTool.exe en {{ falcon_uninstaller_path }}"
-      when: not falcon_uninstaller.stat.exists
-
-    - name: Desinstalar CrowdStrike Falcon Sensor
-      ansible.windows.win_command: >
-        "{{ falcon_uninstaller_path }}"
-        /quiet
-        MAINTENANCE_TOKEN={{ falcon_uninstall_token }}
-      register: falcon_uninstall
+        success_msg: "Token de desinstalación recibido correctamente."
       no_log: true
-      changed_when: falcon_uninstall.rc in [0, 3010]
-      failed_when: falcon_uninstall.rc not in [0, 3010]
 
-    - name: Verificar si el servicio CrowdStrike sigue presente
+    # ---------------------------------------------------------
+    # 2. Crear C:\tmp si no existe
+    # ---------------------------------------------------------
+
+    - name: Crear directorio temporal
+      ansible.windows.win_file:
+        path: 'C:\tmp'
+        state: directory
+
+    # ---------------------------------------------------------
+    # 3. Copiar script desde el proyecto
+    # ---------------------------------------------------------
+
+    - name: Copiar script de desinstalación de CrowdStrike
+      ansible.windows.win_copy:
+        src: "{{ falcon_script_src }}"
+        dest: "{{ falcon_script_dest }}"
+
+    # ---------------------------------------------------------
+    # 4. Verificar que el script fue copiado
+    # ---------------------------------------------------------
+
+    - name: Verificar script de desinstalación
+      ansible.windows.win_stat:
+        path: "{{ falcon_script_dest }}"
+      register: falcon_script_check
+
+    - name: Detener ejecución si el script no existe
+      ansible.builtin.fail:
+        msg: "No se pudo copiar {{ falcon_script_dest }}"
+      when: not falcon_script_check.stat.exists
+
+    # ---------------------------------------------------------
+    # 5. Verificar Falcon antes de desinstalar
+    # ---------------------------------------------------------
+
+    - name: Consultar servicio CrowdStrike antes de desinstalar
       ansible.windows.win_service_info:
         name: CSFalconService
-      register: falcon_service
+      register: falcon_before
+
+    - name: Mostrar estado inicial
+      ansible.builtin.debug:
+        msg: >-
+          {% if falcon_before.services | length > 0 %}
+          CrowdStrike Falcon Sensor está instalado.
+          Estado: {{ falcon_before.services[0].state }}
+          {% else %}
+          CrowdStrike Falcon Sensor no fue detectado.
+          {% endif %}
+
+    # ---------------------------------------------------------
+    # 6. Ejecutar script oficial de desinstalación
+    # ---------------------------------------------------------
+
+    - name: Ejecutar desinstalación de CrowdStrike Falcon
+      ansible.windows.win_shell: |
+        & "{{ falcon_script_dest }}" `
+          -MaintenanceToken "{{ falcon_uninstall_token }}" `
+          -UninstallTool installcache
+      register: falcon_uninstall
+      no_log: true
+      when: falcon_before.services | length > 0
+
+    # ---------------------------------------------------------
+    # 7. Esperar finalización
+    # ---------------------------------------------------------
+
+    - name: Esperar finalización de la desinstalación
+      ansible.builtin.pause:
+        seconds: 15
+      when: falcon_before.services | length > 0
+
+    # ---------------------------------------------------------
+    # 8. Verificar resultado
+    # ---------------------------------------------------------
+
+    - name: Consultar servicio CrowdStrike después de desinstalar
+      ansible.windows.win_service_info:
+        name: CSFalconService
+      register: falcon_after
+
+    # ---------------------------------------------------------
+    # 9. Mostrar resumen
+    # ---------------------------------------------------------
 
     - name: Mostrar resultado final
       ansible.builtin.debug:
-        msg: >-
-          {% if falcon_service.services | length == 0 %}
-          OK - CrowdStrike Falcon Sensor fue desinstalado.
-          {% else %}
-          ADVERTENCIA - El servicio CSFalconService todavía existe.
-          Estado actual: {{ falcon_service.services[0].state }}
-          {% endif %}
+        msg:
+          - "=============================================="
+          - " RESULTADO DESINSTALACION CROWDSTRIKE FALCON"
+          - "=============================================="
+          - >-
+            {% if falcon_after.services | length == 0 %}
+            RESULTADO: EXITOSA
+            {% else %}
+            RESULTADO: FALLIDA
+            {% endif %}
+          - >-
+            {% if falcon_after.services | length == 0 %}
+            CrowdStrike Falcon Sensor ya no está presente.
+            {% else %}
+            El servicio CSFalconService continúa presente.
+            Estado: {{ falcon_after.services[0].state }}
+            {% endif %}
+          - "=============================================="
+
+    # ---------------------------------------------------------
+    # 10. Eliminar script temporal
+    # ---------------------------------------------------------
+
+    - name: Eliminar script temporal
+      ansible.windows.win_file:
+        path: "{{ falcon_script_dest }}"
+        state: absent
