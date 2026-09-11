@@ -83,7 +83,7 @@
           -MaintenanceToken "{{ falcon_uninstall_token }}" `
           -UninstallTool installcache
       register: falcon_uninstall
-      no_log: true
+      no_log: false
       when: falcon_before.services | length > 0
 
     # ---------------------------------------------------------
