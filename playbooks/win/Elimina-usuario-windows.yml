@@ -1,0 +1,30 @@
+---
+- name: Eliminar usuario local de Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Validar que se haya proporcionado el usuario
+      ansible.builtin.assert:
+        that:
+          - usuario_eliminar is defined
+          - usuario_eliminar | trim | length > 0
+        fail_msg: "ERROR: Debe proporcionar el nombre del usuario a eliminar."
+        success_msg: "Usuario recibido: {{ usuario_eliminar }}"
+
+    - name: Eliminar usuario local
+      ansible.windows.win_user:
+        name: "{{ usuario_eliminar }}"
+        state: absent
+      register: resultado_eliminacion
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg: >-
+          {% if resultado_eliminacion.changed %}
+          El usuario local '{{ usuario_eliminar }}' fue eliminado correctamente.
+          {% else %}
+          El usuario local '{{ usuario_eliminar }}' no existe en el servidor.
+          No fue necesario realizar cambios.
+          {% endif %}
