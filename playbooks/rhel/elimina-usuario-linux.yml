@@ -1,0 +1,125 @@
+---
+- name: Eliminar usuario local de RHEL y sus permisos sudo
+  hosts: linux
+  become: true
+  gather_facts: false
+
+  vars:
+    sudoers_dir: /etc/sudoers.d
+
+  tasks:
+
+    # ============================================================
+    # VALIDACIÓN DE VARIABLE
+    # ============================================================
+
+    - name: Validar variable username
+      ansible.builtin.assert:
+        that:
+          - username is defined
+          - username | trim | length > 0
+          - username is match('^[a-z_][a-z0-9_-]*[$]?$')
+        fail_msg: >
+          Debe proporcionar un nombre de usuario válido mediante
+          la variable 'username'.
+
+    # ============================================================
+    # VALIDAR SI EL USUARIO EXISTE
+    # ============================================================
+
+    - name: Verificar si el usuario existe
+      ansible.builtin.command:
+        cmd: "id {{ username }}"
+      register: user_check
+      changed_when: false
+      failed_when: false
+
+    - name: Informar si el usuario existe
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'El usuario ' ~ username ~ ' existe en el servidor.'
+            if user_check.rc == 0
+            else
+            'El usuario ' ~ username ~ ' NO existe en el servidor.'
+          }}
+
+    # ============================================================
+    # VALIDAR SUDOERS
+    # ============================================================
+
+    - name: Verificar archivo sudoers individual
+      ansible.builtin.stat:
+        path: "{{ sudoers_dir }}/{{ username }}"
+      register: sudoers_file
+
+    - name: Informar si tiene archivo sudoers individual
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'El usuario ' ~ username ~
+            ' tiene configuración sudo en ' ~
+            sudoers_dir ~ '/' ~ username
+            if sudoers_file.stat.exists
+            else
+            'El usuario ' ~ username ~
+            ' NO tiene un archivo sudo individual en ' ~ sudoers_dir
+          }}
+
+    # ============================================================
+    # ELIMINAR PERMISOS SUDO
+    # ============================================================
+
+    - name: Eliminar archivo sudoers del usuario
+      ansible.builtin.file:
+        path: "{{ sudoers_dir }}/{{ username }}"
+        state: absent
+      when: sudoers_file.stat.exists
+
+    # ============================================================
+    # ELIMINAR USUARIO
+    # ============================================================
+
+    - name: Eliminar usuario y su directorio home
+      ansible.builtin.user:
+        name: "{{ username }}"
+        state: absent
+        remove: true
+      when: user_check.rc == 0
+      register: user_deleted
+
+    # ============================================================
+    # VALIDACIÓN FINAL
+    # ============================================================
+
+    - name: Verificar que el usuario ya no existe
+      ansible.builtin.command:
+        cmd: "id {{ username }}"
+      register: final_user_check
+      changed_when: false
+      failed_when: false
+
+    - name: Verificar estado final del archivo sudoers
+      ansible.builtin.stat:
+        path: "{{ sudoers_dir }}/{{ username }}"
+      register: final_sudoers_check
+
+    # ============================================================
+    # REPORTE FINAL
+    # ============================================================
+
+    - name: Reporte final
+      ansible.builtin.debug:
+        msg:
+          - "===================================================="
+          - " ELIMINACIÓN DE USUARIO RHEL"
+          - "===================================================="
+          - "Servidor          : {{ inventory_hostname }}"
+          - "Usuario           : {{ username }}"
+          - "----------------------------------------------------"
+          - "Usuario existía   : {{ 'SÍ' if user_check.rc == 0 else 'NO' }}"
+          - "Tenía sudoers     : {{ 'SÍ' if sudoers_file.stat.exists else 'NO' }}"
+          - "----------------------------------------------------"
+          - "Usuario eliminado : {{ 'SÍ' if final_user_check.rc != 0 else 'NO' }}"
+          - "Sudoers eliminado : {{ 'SÍ' if not final_sudoers_check.stat.exists else 'NO' }}"
+          - "===================================================="
