@@ -1,0 +1,112 @@
+---
+- name: Reporte de usuarios locales en Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Obtener usuarios locales del servidor
+      ansible.windows.win_powershell:
+        script: |
+          $users = Get-LocalUser
+
+          $adminGroup = Get-LocalGroup |
+            Where-Object { $_.SID -eq 'S-1-5-32-544' }
+
+          $adminMembers = @()
+
+          if ($adminGroup) {
+              $adminMembers = Get-LocalGroupMember -Group $adminGroup.Name |
+                  Select-Object -ExpandProperty Name
+          }
+
+          $result = foreach ($user in $users) {
+
+              $computerName = $env:COMPUTERNAME
+              $localAccountName = "$computerName\$($user.Name)"
+
+              $isAdmin = $adminMembers -contains $localAccountName
+
+              [PSCustomObject]@{
+                  Usuario          = $user.Name
+                  NombreCompleto   = $user.FullName
+                  Descripcion      = $user.Description
+                  Habilitado       = $user.Enabled
+                  PasswordExpira   = $user.PasswordExpires
+                  UltimoLogin      = $user.LastLogon
+                  SID              = $user.SID.Value
+                  Administrador    = $isAdmin
+              }
+          }
+
+          $result | ConvertTo-Json -Depth 5
+      register: local_users_raw
+
+
+    - name: Convertir resultado JSON
+      ansible.builtin.set_fact:
+        local_users: >-
+          {{
+            local_users_raw.output[0]
+            | from_json
+          }}
+
+
+    - name: Mostrar reporte de usuarios locales
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+                     REPORTE DE USUARIOS LOCALES
+          ============================================================
+
+          Servidor: {{ inventory_hostname }}
+
+          Total de usuarios locales: {{ local_users | length }}
+
+          ------------------------------------------------------------
+          DETALLE DE USUARIOS
+          ------------------------------------------------------------
+          {% for user in local_users %}
+
+          Usuario          : {{ user.Usuario }}
+          Nombre completo  : {{ user.NombreCompleto | default('No definido', true) }}
+          Descripción      : {{ user.Descripcion | default('Sin descripción', true) }}
+          Habilitado       : {{ 'SI' if user.Habilitado else 'NO' }}
+          Administrador    : {{ 'SI' if user.Administrador else 'NO' }}
+          Password expira  : {{ 'SI' if user.PasswordExpira else 'NO' }}
+          Último login     : {{ user.UltimoLogin | default('Sin información', true) }}
+          SID              : {{ user.SID }}
+
+          ------------------------------------------------------------
+          {% endfor %}
+
+
+    - name: Mostrar resumen ejecutivo
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+                         RESUMEN EJECUTIVO
+          ============================================================
+
+          Servidor: {{ inventory_hostname }}
+
+          Usuarios locales encontrados : {{ local_users | length }}
+
+          Usuarios habilitados:
+          {% for user in local_users if user.Habilitado %}
+            - {{ user.Usuario }}
+          {% endfor %}
+
+          Usuarios deshabilitados:
+          {% for user in local_users if not user.Habilitado %}
+            - {{ user.Usuario }}
+          {% endfor %}
+
+          Usuarios con privilegios de administrador:
+          {% for user in local_users if user.Administrador %}
+            - {{ user.Usuario }}
+          {% else %}
+            - Ninguno
+          {% endfor %}
+
+          ============================================================
