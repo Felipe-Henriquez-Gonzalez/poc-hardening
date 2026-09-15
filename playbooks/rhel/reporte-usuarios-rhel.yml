@@ -1,0 +1,102 @@
+---
+- name: Reporte de usuarios locales en RHEL
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Obtener usuarios locales desde /etc/passwd
+      ansible.builtin.getent:
+        database: passwd
+
+    - name: Obtener UID_MIN definido en login.defs
+      ansible.builtin.shell: |
+        awk '/^[[:space:]]*UID_MIN[[:space:]]+/ {print $2}' /etc/login.defs
+      register: uid_min_result
+      changed_when: false
+
+    - name: Definir UID_MIN
+      ansible.builtin.set_fact:
+        uid_min: "{{ uid_min_result.stdout | default('1000') | int }}"
+
+    - name: Obtener miembros del grupo wheel
+      ansible.builtin.command:
+        cmd: getent group wheel
+      register: wheel_group
+      changed_when: false
+      failed_when: false
+
+    - name: Obtener usuarios con contraseña bloqueada o habilitada
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        while IFS=: read -r user passwd uid gid gecos home shell; do
+
+          if [ "$uid" -ge "{{ uid_min }}" ] && [ "$uid" -lt 65534 ]; then
+
+            STATUS=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
+            GROUPS=$(id -Gn "$user" 2>/dev/null | tr ' ' ',')
+
+            if id -nG "$user" 2>/dev/null | grep -qw wheel; then
+              ADMIN="SI"
+            else
+              ADMIN="NO"
+            fi
+
+            case "$shell" in
+              */nologin|*/false)
+                LOGIN="NO"
+                ;;
+              *)
+                LOGIN="SI"
+                ;;
+            esac
+
+            echo "${user}|${uid}|${gid}|${home}|${shell}|${LOGIN}|${ADMIN}|${STATUS}|${GROUPS}"
+
+          fi
+
+        done < /etc/passwd
+      args:
+        executable: /bin/bash
+      register: local_users
+      changed_when: false
+
+    - name: Mostrar encabezado del reporte
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "              REPORTE DE USUARIOS LOCALES RHEL"
+          - "============================================================"
+          - "Servidor : {{ inventory_hostname }}"
+          - "Sistema  : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "UID_MIN  : {{ uid_min }}"
+          - "Usuarios : {{ local_users.stdout_lines | length }}"
+          - "============================================================"
+
+    - name: Mostrar detalle de usuarios locales
+      ansible.builtin.debug:
+        msg: |
+          Usuario        : {{ item.split('|')[0] }}
+          UID            : {{ item.split('|')[1] }}
+          GID            : {{ item.split('|')[2] }}
+          Home           : {{ item.split('|')[3] }}
+          Shell          : {{ item.split('|')[4] }}
+          Puede Login    : {{ item.split('|')[5] }}
+          Administrador  : {{ item.split('|')[6] }}
+          Password       : {{ item.split('|')[7] }}
+          Grupos         : {{ item.split('|')[8] }}
+          ------------------------------------------------------------
+      loop: "{{ local_users.stdout_lines }}"
+
+    - name: Mostrar resumen final
+      ansible.builtin.debug:
+        msg:
+          - "================ RESUMEN ================="
+          - "Servidor: {{ inventory_hostname }}"
+          - "Total usuarios locales: {{ local_users.stdout_lines | length }}"
+          - ""
+          - "Usuarios:"
+          - "{{ local_users.stdout_lines | map('split', '|') | map('first') | list }}"
+          - "=========================================="
