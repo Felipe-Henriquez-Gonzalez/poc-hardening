@@ -1,0 +1,57 @@
+---
+- name: Crear usuario local con privilegios sudo sin password
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  vars:
+    sudoers_dir: /etc/sudoers.d
+
+  tasks:
+
+    - name: Validar variable username
+      ansible.builtin.assert:
+        that:
+          - username is defined
+          - username | trim | length > 0
+          - username is match('^[a-z_][a-z0-9_-]*[$]?$')
+        fail_msg: "Debe proporcionar un nombre de usuario válido mediante la variable 'username'."
+
+    - name: Crear usuario local
+      ansible.builtin.user:
+        name: "{{ username }}"
+        state: present
+        create_home: true
+        shell: /bin/bash
+        password: "{{ user_password | password_hash('sha512') if user_password is defined and user_password | length > 0 else omit }}"
+
+    - name: Crear configuración sudoers para el usuario
+      ansible.builtin.copy:
+        dest: "{{ sudoers_dir }}/{{ username }}"
+        content: |
+          {{ username }} ALL=(ALL) NOPASSWD: ALL
+        owner: root
+        group: root
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Verificar que el usuario fue creado
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ username }}"
+      register: user_validation
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg:
+          - "=============================================="
+          - " CREACIÓN DE USUARIO RHEL"
+          - "=============================================="
+          - "Servidor        : {{ inventory_hostname }}"
+          - "Usuario         : {{ username }}"
+          - "Home            : /home/{{ username }}"
+          - "Shell           : /bin/bash"
+          - "Sudo            : HABILITADO"
+          - "Sudo sin passwd : SÍ"
+          - "Archivo sudoers : /etc/sudoers.d/{{ username }}"
+          - "=============================================="
