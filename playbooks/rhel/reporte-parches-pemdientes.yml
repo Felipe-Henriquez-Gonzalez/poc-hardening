@@ -1,0 +1,221 @@
+---
+- name: Chequeo de actualizaciones y requerimientos de reinicio
+  hosts: linux
+  become: true
+  gather_facts: true
+
+  vars:
+    reporte_actualizaciones: []
+
+  tasks:
+
+    # ============================================================
+    # 1. VALIDACIONES INICIALES
+    # ============================================================
+
+    - name: Validar que el sistema pertenece a la familia Red Hat
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "RedHat"
+        fail_msg: >
+          Este playbook está diseñado para sistemas Red Hat:
+          RHEL, CentOS Stream, Rocky Linux o AlmaLinux.
+        success_msg: >
+          Sistema compatible: {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }}
+
+    # ============================================================
+    # 2. OBTENER ACTUALIZACIONES DISPONIBLES
+    # ============================================================
+
+    - name: Consultar actualizaciones disponibles
+      ansible.builtin.command:
+        cmd: dnf -q check-update
+      register: dnf_updates
+      changed_when: false
+      failed_when: dnf_updates.rc not in [0, 100]
+
+    - name: Obtener listado estructurado de paquetes actualizables
+      ansible.builtin.shell: |
+        set -o pipefail
+        dnf -q check-update 2>/dev/null |
+        awk '
+          NF >= 3 &&
+          $1 !~ /^Last/ &&
+          $1 !~ /^Obsoleting/ &&
+          $1 !~ /^Security:/ {
+            print $1 "|" $2 "|" $3
+          }
+        '
+      args:
+        executable: /bin/bash
+      register: paquetes_actualizables
+      changed_when: false
+      failed_when: false
+
+    # ============================================================
+    # 3. VERIFICAR REINICIO DEL SISTEMA
+    # ============================================================
+
+    - name: Verificar si needs-restarting está disponible
+      ansible.builtin.command:
+        cmd: dnf needs-restarting --help
+      register: needs_restarting_available
+      changed_when: false
+      failed_when: false
+
+    - name: Verificar si el sistema operativo requiere reinicio
+      ansible.builtin.command:
+        cmd: dnf needs-restarting -r
+      register: reboot_required
+      changed_when: false
+      failed_when: false
+      when: needs_restarting_available.rc == 0
+
+    # ============================================================
+    # 4. IDENTIFICAR PROCESOS/SERVICIOS QUE REQUIEREN REINICIO
+    # ============================================================
+
+    - name: Obtener procesos que utilizan archivos actualizados o eliminados
+      ansible.builtin.command:
+        cmd: dnf needs-restarting
+      register: processes_restart
+      changed_when: false
+      failed_when: false
+      when: needs_restarting_available.rc == 0
+
+    - name: Obtener servicios que requieren reinicio
+      ansible.builtin.command:
+        cmd: dnf needs-restarting -s
+      register: services_restart
+      changed_when: false
+      failed_when: false
+      when: needs_restarting_available.rc == 0
+
+    # ============================================================
+    # 5. OBTENER INFORMACIÓN DEL KERNEL
+    # ============================================================
+
+    - name: Obtener kernel actualmente ejecutándose
+      ansible.builtin.command:
+        cmd: uname -r
+      register: running_kernel
+      changed_when: false
+
+    - name: Obtener último kernel instalado
+      ansible.builtin.shell: |
+        rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' |
+        sort -V |
+        tail -1
+      register: latest_installed_kernel
+      changed_when: false
+      failed_when: false
+
+    # ============================================================
+    # 6. PROCESAR PAQUETES ACTUALIZABLES
+    # ============================================================
+
+    - name: Crear lista de paquetes actualizables
+      ansible.builtin.set_fact:
+        lista_updates: "{{ paquetes_actualizables.stdout_lines | default([]) }}"
+
+    - name: Contar actualizaciones
+      ansible.builtin.set_fact:
+        total_updates: "{{ lista_updates | length }}"
+
+    # ============================================================
+    # 7. REPORTE
+    # ============================================================
+
+    - name: Mostrar reporte final
+      ansible.builtin.debug:
+        msg: |
+          
+          ================================================================
+                     REPORTE DE ACTUALIZACIONES LINUX
+          ================================================================
+
+          HOST
+          ----------------------------------------------------------------
+          Hostname            : {{ inventory_hostname }}
+          Sistema Operativo   : {{ ansible_facts.distribution }}
+          Versión             : {{ ansible_facts.distribution_version }}
+          Arquitectura        : {{ ansible_facts.architecture }}
+          Kernel actual       : {{ running_kernel.stdout }}
+          Último kernel       : {{ latest_installed_kernel.stdout | default('N/D') }}
+
+          ================================================================
+          RESUMEN
+          ================================================================
+
+          Actualizaciones disponibles : {{ total_updates }}
+
+          Reinicio del SO requerido    : {{
+            'SI'
+            if (
+              needs_restarting_available.rc == 0 and
+              reboot_required.rc | default(0) != 0
+            )
+            else 'NO'
+          }}
+
+          ================================================================
+          PAQUETES CON ACTUALIZACIONES DISPONIBLES
+          ================================================================
+
+          {% if lista_updates | length > 0 %}
+          {% for item in lista_updates %}
+          {% set datos = item.split('|') %}
+          Paquete     : {{ datos[0] }}
+          Versión     : {{ datos[1] if datos | length > 1 else 'N/D' }}
+          Repositorio : {{ datos[2] if datos | length > 2 else 'N/D' }}
+          ----------------------------------------------------------------
+          {% endfor %}
+          {% else %}
+          No existen actualizaciones disponibles.
+          {% endif %}
+
+          ================================================================
+          SERVICIOS QUE REQUIEREN REINICIO
+          ================================================================
+
+          {% if services_restart.stdout_lines | default([]) | length > 0 %}
+          {% for service in services_restart.stdout_lines %}
+          - {{ service }}
+          {% endfor %}
+          {% else %}
+          No se detectaron servicios que requieran reinicio.
+          {% endif %}
+
+          ================================================================
+          PROCESOS QUE REQUIEREN REINICIO
+          ================================================================
+
+          {% if processes_restart.stdout_lines | default([]) | length > 0 %}
+          {% for process in processes_restart.stdout_lines %}
+          - {{ process }}
+          {% endfor %}
+          {% else %}
+          No se detectaron procesos que requieran reinicio.
+          {% endif %}
+
+          ================================================================
+          REINICIO DEL SISTEMA OPERATIVO
+          ================================================================
+
+          {% if needs_restarting_available.rc == 0 %}
+          {% if reboot_required.rc | default(0) != 0 %}
+          RESULTADO: REINICIO REQUERIDO
+
+          {{ reboot_required.stdout | default('El sistema requiere reinicio.') }}
+          {% else %}
+          RESULTADO: NO SE REQUIERE REINICIO DEL SISTEMA OPERATIVO
+          {% endif %}
+          {% else %}
+          No fue posible utilizar dnf needs-restarting.
+          Verifique que el plugin correspondiente se encuentre instalado.
+          {% endif %}
+
+          ================================================================
+                           FIN DEL REPORTE
+          ================================================================
